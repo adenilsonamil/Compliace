@@ -106,9 +106,10 @@ def webhook():
         protocolo = msg
         result = supabase.table("denuncias").select("*").eq("protocolo", protocolo).eq("telefone", telefone).execute()
         if result.data:
-            descricao = result.data[0]
-            enviar_msg(telefone, f"📌 Protocolo {protocolo} encontrado:\n\nResumo: {descricao.get('resumo', 'Sem resumo disponível')}\n"
-                                 f"Categoria: {descricao.get('categoria', 'Não classificada')}")
+            denuncia = result.data[0]
+            enviar_msg(telefone, f"📌 Protocolo {protocolo} encontrado:\n\n"
+                                 f"Resumo: {denuncia.get('resumo', 'Sem resumo')}\n"
+                                 f"Categoria: {denuncia.get('categoria', 'Não classificada')}")
         else:
             enviar_msg(telefone, "⚠️ Nenhum protocolo encontrado para o seu número.")
         reset_sessao(telefone)
@@ -168,7 +169,6 @@ def webhook():
             ]
         ).choices[0].message.content
 
-        # Separar resumo e categoria
         resumo, categoria = "", "Outro"
         if "Categoria:" in resposta:
             partes = resposta.split("Categoria:")
@@ -179,15 +179,60 @@ def webhook():
 
         dados["resumo"] = resumo
         dados["categoria"] = categoria
-        sessoes[telefone]["etapa"] = "confirmar"
+        sessoes[telefone]["etapa"] = "coletar_data"
 
-        enviar_msg(telefone, f"📋 Aqui está o resumo da sua denúncia:\n\n{resumo}\n\n"
+        enviar_msg(telefone, f"📋 Resumo da denúncia:\n\n{resumo}\n\n"
                              f"🗂️ Categoria sugerida: {categoria}\n\n"
-                             "Digite 1️⃣ para confirmar ou 2️⃣ para corrigir.")
+                             "Agora precisamos de mais informações.\n"
+                             "🗓️ Quando o fato ocorreu (data e horário aproximados)?")
         return "OK", 200
 
-    # Confirmação
-    if etapa == "confirmar":
+    # Perguntas complementares
+    if etapa == "coletar_data":
+        dados["data_fato"] = msg
+        sessoes[telefone]["etapa"] = "coletar_local"
+        enviar_msg(telefone, "📍 Onde aconteceu o fato (setor, filial, área, etc.)?")
+        return "OK", 200
+
+    if etapa == "coletar_local":
+        dados["local"] = msg
+        sessoes[telefone]["etapa"] = "coletar_envolvidos"
+        enviar_msg(telefone, "👥 Quem estava envolvido? (pode informar cargos ou funções caso não saiba os nomes)")
+        return "OK", 200
+
+    if etapa == "coletar_envolvidos":
+        dados["envolvidos"] = msg
+        sessoes[telefone]["etapa"] = "coletar_testemunhas"
+        enviar_msg(telefone, "👀 Havia outras pessoas que presenciaram o fato?")
+        return "OK", 200
+
+    if etapa == "coletar_testemunhas":
+        dados["testemunhas"] = msg
+        sessoes[telefone]["etapa"] = "coletar_evidencias"
+        enviar_msg(telefone, "📎 Você possui documentos, fotos, vídeos ou outras evidências que possam ajudar?")
+        return "OK", 200
+
+    if etapa == "coletar_evidencias":
+        dados["evidencias"] = msg
+        sessoes[telefone]["etapa"] = "coletar_frequencia"
+        enviar_msg(telefone, "🔄 Esse fato ocorreu apenas uma vez ou é recorrente?")
+        return "OK", 200
+
+    if etapa == "coletar_frequencia":
+        dados["frequencia"] = msg
+        sessoes[telefone]["etapa"] = "coletar_impacto"
+        enviar_msg(telefone, "⚖️ Na sua visão, qual o impacto ou gravidade desse ocorrido?")
+        return "OK", 200
+
+    if etapa == "coletar_impacto":
+        dados["impacto"] = msg
+        sessoes[telefone]["etapa"] = "confirmar_final"
+        enviar_msg(telefone, "✅ Todas as informações foram coletadas.\n\n"
+                             "Digite 1️⃣ para confirmar e registrar sua denúncia ou 2️⃣ para cancelar.")
+        return "OK", 200
+
+    # Confirmação final
+    if etapa == "confirmar_final":
         if msg == "1":
             protocolo = str(uuid.uuid4())[:8]
             dados["protocolo"] = protocolo
@@ -200,10 +245,10 @@ def webhook():
                                  f"Guarde este número para futuras consultas.")
             reset_sessao(telefone)
         elif msg == "2":
-            sessoes[telefone]["etapa"] = "coletar_descricao"
-            enviar_msg(telefone, "✍️ Ok, descreva novamente sua denúncia:")
+            reset_sessao(telefone)
+            enviar_msg(telefone, "❌ Registro cancelado. Digite qualquer mensagem para começar de novo.")
         else:
-            enviar_msg(telefone, "⚠️ Resposta inválida. Digite 1️⃣ para confirmar ou 2️⃣ para corrigir.")
+            enviar_msg(telefone, "⚠️ Resposta inválida. Digite 1️⃣ para confirmar ou 2️⃣ para cancelar.")
         return "OK", 200
 
     return "OK", 200
