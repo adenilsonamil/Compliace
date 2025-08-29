@@ -3,3 +3,4 @@ gunicorn==21.2.0
 twilio==8.2.0
 supabase==2.3.0
 requests==2.32.3
+openai==1.30.1
