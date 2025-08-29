@@ -1,162 +1,136 @@
 import os
 import time
-import random
-from flask import Flask, request
+import uuid
+from flask import Flask, request, jsonify
 from twilio.twiml.messaging_response import MessagingResponse
 from supabase import create_client, Client
 from openai import OpenAI
 
-# ==============================
-# Variáveis de ambiente obrigatórias
-# ==============================
+# Configurações de ambiente
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
 
-if not SUPABASE_URL or not SUPABASE_KEY:
-    raise ValueError("❌ Variáveis SUPABASE_URL e SUPABASE_KEY não configuradas.")
-
-if not OPENAI_API_KEY:
-    raise ValueError("❌ Variável OPENAI_API_KEY não configurada.")
-
-# ==============================
-# Inicializações
-# ==============================
-app = Flask(__name__)
+# Conexão com Supabase
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# Conexão com OpenAI
 openai = OpenAI(api_key=OPENAI_API_KEY)
 
-# Estados de sessão por usuário
+# Flask app
+app = Flask(__name__)
+
+# Estado da conversa em memória
 user_sessions = {}
 
-# ==============================
-# Função para gerar protocolo único
-# ==============================
-def generate_protocol():
-    return f"PROTO-{random.randint(10000, 99999)}"
-
-# ==============================
-# Função para resumir denúncia (com fallback)
-# ==============================
+# Função IA para resumir denúncia
 def resumir_texto(texto):
     try:
         resposta = openai.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "Resuma a denúncia de forma clara e objetiva."},
+                {"role": "system", "content": "Você é um assistente especializado em compliance. Resuma a denúncia do usuário de forma clara e coerente."},
                 {"role": "user", "content": texto}
-            ],
-            max_tokens=100
+            ]
         )
         return resposta.choices[0].message.content.strip()
     except Exception as e:
-        print(f"⚠️ Erro ao resumir com OpenAI: {e}")
-        return texto  # fallback → retorna o texto original
+        return f"(Falha ao resumir com IA: {str(e)})"
 
-# ==============================
-# Rota principal do webhook
-# ==============================
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
     incoming_msg = request.values.get("Body", "").strip()
     from_number = request.values.get("From", "").replace("whatsapp:", "")
+
     resp = MessagingResponse()
     msg = resp.message()
 
-    # Se não existir sessão, cria
+    # Se não existe sessão, cria
     if from_number not in user_sessions:
-        user_sessions[from_number] = {"state": "menu"}
-        msg.body("👋 Bem-vindo ao Canal de Denúncias de Compliance!\n\nDeseja prosseguir como:\n\n1️⃣ Anônimo\n2️⃣ Identificado")
+        user_sessions[from_number] = {"step": "inicio", "dados": {}}
+        msg.body("👋 Olá! Bem-vindo ao Canal de Denúncias de Compliance.\n\n"
+                 "Estamos aqui para ouvir você e tratar sua denúncia com sigilo e seriedade.")
+        time.sleep(5)
+        msg.body("Deseja realizar uma denúncia:\n1️⃣ Anônima\n2️⃣ Identificada")
         return str(resp)
 
     session = user_sessions[from_number]
+    step = session["step"]
 
-    # ==============================
-    # Estado: menu inicial
-    # ==============================
-    if session["state"] == "menu":
+    # Etapas da conversa
+    if step == "inicio":
         if incoming_msg == "1":
-            session["anonimo"] = True
-            session["state"] = "denuncia"
-            msg.body("✅ Ok! Você escolheu denúncia **anônima**.\n\nPor favor, descreva sua denúncia:")
+            session["dados"]["anonima"] = True
+            session["step"] = "denuncia"
+            msg.body("✅ Você escolheu fazer uma denúncia anônima.\n\nPor favor, descreva sua denúncia com o máximo de detalhes.")
         elif incoming_msg == "2":
-            session["anonimo"] = False
-            session["state"] = "identificacao_nome"
-            msg.body("Por favor, informe seu **nome completo**:")
+            session["dados"]["anonima"] = False
+            session["step"] = "nome"
+            msg.body("Por favor, informe seu *nome completo*:")
         else:
-            msg.body("❌ Opção inválida. Responda com:\n1️⃣ Anônimo\n2️⃣ Identificado")
+            msg.body("⚠️ Opção inválida. Digite 1 para Anônima ou 2 para Identificada.")
+    
+    elif step == "nome":
+        session["dados"]["nome"] = incoming_msg
+        session["step"] = "email"
+        msg.body("Agora, por favor, informe seu *e-mail*:")
 
-    # ==============================
-    # Identificação
-    # ==============================
-    elif session["state"] == "identificacao_nome":
-        session["nome"] = incoming_msg
-        session["state"] = "identificacao_email"
-        msg.body("Agora, informe seu **e-mail**:")
+    elif step == "email":
+        session["dados"]["email"] = incoming_msg
+        session["step"] = "denuncia"
+        msg.body("✅ Obrigado! Agora, descreva sua denúncia com o máximo de detalhes:")
 
-    elif session["state"] == "identificacao_email":
-        session["email"] = incoming_msg
-        session["state"] = "denuncia"
-        msg.body("Obrigado! Agora descreva sua denúncia:")
-
-    # ==============================
-    # Coleta da denúncia
-    # ==============================
-    elif session["state"] == "denuncia":
-        session["denuncia_raw"] = incoming_msg
+    elif step == "denuncia":
+        session["dados"]["descricao"] = incoming_msg
         resumo = resumir_texto(incoming_msg)
-        session["denuncia_resumida"] = resumo
-        session["state"] = "confirmacao"
-        msg.body(f"Aqui está o resumo da sua denúncia:\n\n{resumo}\n\nConfirma que está correto?\n1️⃣ Confirmar\n2️⃣ Corrigir")
+        session["dados"]["resumo"] = resumo
+        session["step"] = "confirmar"
+        msg.body(f"📋 Aqui está o resumo da sua denúncia:\n\n{resumo}\n\nEstá correto?\n1️⃣ Sim\n2️⃣ Corrigir")
 
-    # ==============================
-    # Confirmação
-    # ==============================
-    elif session["state"] == "confirmacao":
+    elif step == "confirmar":
         if incoming_msg == "1":
-            protocolo = generate_protocol()
-            session["protocolo"] = protocolo
+            protocolo = str(uuid.uuid4())[:8].upper()
+            session["dados"]["protocolo"] = protocolo
+            session["step"] = "finalizado"
 
-            # Salvar no Supabase
-            data = {
+            # Salva no Supabase
+            denuncia_data = {
                 "telefone": from_number,
-                "anonimo": session.get("anonimo", True),
-                "nome": session.get("nome", None),
-                "email": session.get("email", None),
-                "denuncia": session["denuncia_resumida"],
+                "anonima": session["dados"].get("anonima", True),
+                "nome": session["dados"].get("nome"),
+                "email": session["dados"].get("email"),
+                "descricao": session["dados"].get("descricao"),
+                "resumo": session["dados"].get("resumo"),
                 "protocolo": protocolo
             }
-            supabase.table("denuncias").insert(data).execute()
+            supabase.table("denuncias").insert(denuncia_data).execute()
 
-            msg.body(f"✅ Sua denúncia foi registrada com sucesso!\n\n📌 Protocolo: *{protocolo}*\n\nVocê pode consultar o andamento enviando o número do protocolo.")
-            session["state"] = "menu"
-
+            msg.body(f"✅ Sua denúncia foi registrada com sucesso!\n\n📌 Protocolo: *{protocolo}*\n\n"
+                     "Guarde esse número para acompanhar o andamento. Basta enviá-lo aqui no chat para consultar.")
         elif incoming_msg == "2":
-            session["state"] = "denuncia"
-            msg.body("✍️ Ok, por favor reescreva sua denúncia:")
+            session["step"] = "denuncia"
+            msg.body("Ok, por favor, descreva novamente sua denúncia com as correções necessárias:")
         else:
-            msg.body("❌ Resposta inválida. Digite:\n1️⃣ Confirmar\n2️⃣ Corrigir")
+            msg.body("⚠️ Resposta inválida. Digite 1 para Confirmar ou 2 para Corrigir.")
 
-    # ==============================
-    # Consulta de protocolo
-    # ==============================
-    else:
-        if incoming_msg.startswith("PROTO-"):
-            protocolo = incoming_msg.strip()
-            result = supabase.table("denuncias").select("*").eq("telefone", from_number).eq("protocolo", protocolo).execute()
+    elif step == "finalizado":
+        # Consulta por protocolo
+        if len(incoming_msg) == 8:  # supondo protocolo de 8 caracteres
+            result = supabase.table("denuncias").select("*").eq("protocolo", incoming_msg).eq("telefone", from_number).execute()
             if result.data:
                 denuncia = result.data[0]
-                msg.body(f"📋 Protocolo {protocolo}\n\nDenúncia registrada:\n{denuncia['denuncia']}")
+                msg.body(f"📌 Detalhes da denúncia ({denuncia['protocolo']}):\n\n{denuncia['resumo']}")
             else:
-                msg.body("❌ Protocolo não encontrado ou não pertence a este número.")
+                msg.body("❌ Protocolo não encontrado ou não pertence a este número de telefone.")
         else:
-            msg.body("🤖 Não entendi. Digite:\n1️⃣ para denúncia anônima\n2️⃣ para denúncia identificada\nOu informe um número de protocolo.")
+            msg.body("Sua denúncia já foi registrada. Caso queira consultar, informe seu número de protocolo.")
+
+    else:
+        msg.body("⚠️ Não entendi sua mensagem. Por favor, siga as instruções do fluxo.")
 
     return str(resp)
 
-# ==============================
-# Inicialização local
-# ==============================
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000, debug=True)
