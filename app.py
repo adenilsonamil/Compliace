@@ -47,14 +47,17 @@ def resumo_denuncia(texto):
 
 def salvar_denuncia(telefone, dados, resumo):
     protocolo = gerar_protocolo()
-    supabase.table("denuncias").insert({
-        "telefone": telefone,
-        "nome": dados.get("nome"),
-        "email": dados.get("email"),
-        "denuncia": dados.get("denuncia"),
-        "resumo": resumo,
-        "protocolo": protocolo
-    }).execute()
+    try:
+        supabase.table("denuncias").insert({
+            "telefone": telefone,
+            "nome": dados.get("nome"),
+            "email": dados.get("email"),
+            "denuncia": dados.get("denuncia"),
+            "resumo": resumo,
+            "protocolo": protocolo
+        }).execute()
+    except Exception as e:
+        print(f"⚠️ Erro ao salvar no Supabase: {e}")
     return protocolo
 
 
@@ -89,14 +92,11 @@ def webhook():
         sessao = sessoes[from_number]
 
     sessao["last_active"] = time.time()
-
     state = sessao["state"]
 
     # =========================
     # FLUXO DE CONVERSA
     # =========================
-
-    # Início da conversa
     if state == "inicio":
         resp.message("👋 Olá! Bem-vindo ao Canal de Denúncias de Compliance.\n\n"
                      "Você gostaria de realizar sua denúncia:\n"
@@ -104,52 +104,46 @@ def webhook():
                      "2️⃣ Se identificando")
         sessao["state"] = "escolha_tipo"
 
-    # Escolha entre anônimo ou identificado
     elif state == "escolha_tipo":
         if incoming_msg == "1":
             sessao["anonimo"] = True
             resp.message("✅ Entendido. Sua denúncia será **anônima**.\n\nPor favor, descreva sua denúncia:")
             sessao["state"] = "coletando_denuncia"
-
         elif incoming_msg == "2":
             sessao["anonimo"] = False
             resp.message("✍️ Por favor, informe seu **nome completo**:")
             sessao["state"] = "coletando_nome"
-
         else:
             resp.message("❌ Opção inválida. Digite 1 para anônima ou 2 para identificada.")
 
-    # Nome do denunciante
     elif state == "coletando_nome":
         sessao["nome"] = incoming_msg
         resp.message("📧 Agora, informe seu **e-mail**:")
         sessao["state"] = "coletando_email"
 
-    # E-mail do denunciante
     elif state == "coletando_email":
         sessao["email"] = incoming_msg
         resp.message("✅ Obrigado. Agora, por favor descreva sua denúncia:")
         sessao["state"] = "coletando_denuncia"
 
-    # Captura da denúncia
     elif state == "coletando_denuncia":
         sessao["denuncia"] = incoming_msg
         resumo = resumo_denuncia(incoming_msg)
         sessao["resumo"] = resumo
         resp.message(f"📋 Aqui está um resumo da sua denúncia:\n\n{resumo}\n\n"
                      "Confirma que as informações estão corretas?\n"
-                     "1️⃣ Sim, está correto\n"
-                     "2️⃣ Não, quero corrigir")
+                     "1️⃣ Confirmar\n"
+                     "2️⃣ Corrigir")
         sessao["state"] = "confirmando"
 
-    # Confirmação final
     elif state == "confirmando":
         if incoming_msg == "1":
             protocolo = salvar_denuncia(from_number, sessao, sessao["resumo"])
             resp.message(f"✅ Sua denúncia foi registrada com sucesso!\n\n"
                          f"📋 Resumo: {sessao['resumo']}\n"
                          f"📌 Protocolo: {protocolo}\n\n"
-                         "Guarde este número para futuras consultas.")
+                         "Guarde este número para futuras consultas digitando:\n"
+                         f"protocolo {protocolo}")
             resetar_sessao(from_number)
 
         elif incoming_msg == "2":
@@ -159,7 +153,6 @@ def webhook():
         else:
             resp.message("❌ Resposta inválida. Digite 1 para confirmar ou 2 para corrigir.")
 
-    # Consulta de protocolo
     elif incoming_msg.lower().startswith("protocolo"):
         partes = incoming_msg.split()
         if len(partes) >= 2:
