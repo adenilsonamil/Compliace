@@ -1,145 +1,178 @@
 import os
-import random
-import string
-import time
-from flask import Flask, request, Response
+import uuid
+import datetime
+from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
 from supabase import create_client, Client
-import openai
+from openai import OpenAI
 
-# Configs
+# Configurações
+app = Flask(__name__)
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-TWILIO_NUMBER = os.getenv("TWILIO_NUMBER")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-openai.api_key = OPENAI_API_KEY
+openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-app = Flask(__name__)
-
-# Sessões temporárias
+# Sessões em memória
 sessions = {}
-SESSION_TIMEOUT = 300  # 5 minutos
+TIMEOUT_MINUTES = 5
 
+def reset_session(user):
+    if user in sessions:
+        del sessions[user]
 
-def gerar_protocolo():
-    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+def generate_protocol():
+    return datetime.datetime.now().strftime("%Y%m%d-%H%M%S-") + str(uuid.uuid4())[:6]
 
-
-def resumir_texto(texto):
+def summarize_text(text):
     try:
-        resp = openai.chat.completions.create(
+        resp = openai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "Resuma a denúncia de forma clara e objetiva."},
-                {"role": "user", "content": texto}
-            ],
-            max_tokens=60
+                {"role": "system", "content": "Resuma a denúncia de forma clara e coerente."},
+                {"role": "user", "content": text}
+            ]
         )
         return resp.choices[0].message.content.strip()
-    except Exception:
-        return texto  # fallback caso falhe a API
-
-
-def resetar_sessao(telefone):
-    if telefone in sessions:
-        del sessions[telefone]
-
-
-def processar_mensagem(telefone, msg):
-    agora = time.time()
-
-    # Reset automático após inatividade
-    if telefone in sessions and agora - sessions[telefone]["ultimo_tempo"] > SESSION_TIMEOUT:
-        resetar_sessao(telefone)
-
-    # Nova sessão
-    if telefone not in sessions:
-        sessions[telefone] = {"etapa": "inicio", "ultimo_tempo": agora}
-        return ("👋 Bem-vindo ao Canal de Denúncias de Compliance!\n"
-                "Deseja prosseguir como:\n\n"
-                "1️⃣ Anônimo\n"
-                "2️⃣ Identificado")
-
-    sessions[telefone]["ultimo_tempo"] = agora
-    etapa = sessions[telefone]["etapa"]
-
-    # Etapa escolha tipo
-    if etapa == "inicio":
-        if msg == "1":
-            sessions[telefone]["tipo"] = "anonimo"
-            sessions[telefone]["etapa"] = "descricao"
-            return "✅ Ok! Você escolheu denúncia **anônima**.\n\nPor favor, descreva sua denúncia:"
-        elif msg == "2":
-            sessions[telefone]["tipo"] = "identificado"
-            sessions[telefone]["etapa"] = "nome"
-            return "✍️ Por favor, digite seu nome:"
-        else:
-            return "⚠️ Escolha inválida. Digite *1* para Anônimo ou *2* para Identificado."
-
-    # Nome se identificado
-    if etapa == "nome":
-        sessions[telefone]["nome"] = msg
-        sessions[telefone]["etapa"] = "descricao"
-        return "✍️ Agora, descreva sua denúncia:"
-
-    # Descrição
-    if etapa == "descricao":
-        resumo = resumir_texto(msg)
-        sessions[telefone]["descricao"] = resumo
-        sessions[telefone]["etapa"] = "confirmar"
-        return (f"📝 Aqui está o resumo da sua denúncia:\n\n{resumo}\n\n"
-                "Confirma que está correto?\n\n"
-                "1️⃣ Confirmar\n"
-                "2️⃣ Corrigir")
-
-    # Confirmação
-    if etapa == "confirmar":
-        if msg == "1":
-            protocolo = gerar_protocolo()
-            sessions[telefone]["protocolo"] = protocolo
-
-            # Salvar no Supabase
-            try:
-                supabase.table("denuncias").insert({
-                    "protocolo": protocolo,
-                    "tipo": sessions[telefone].get("tipo", "anonimo"),
-                    "nome": sessions[telefone].get("nome"),
-                    "descricao": sessions[telefone].get("descricao"),
-                    "telefone": telefone
-                }).execute()
-            except Exception as e:
-                return f"⚠️ Erro ao salvar denúncia: {e}"
-
-            resetar_sessao(telefone)
-            return (f"✅ Sua denúncia foi registrada com sucesso!\n\n"
-                    f"📌 Protocolo: *{protocolo}*\n\n"
-                    "Guarde este número para futuras consultas.")
-        elif msg == "2":
-            sessions[telefone]["etapa"] = "descricao"
-            return "✍️ Ok, por favor reescreva sua denúncia:"
-        else:
-            return "⚠️ Resposta inválida. Digite *1* para Confirmar ou *2* para Corrigir."
-
-    return "⚠️ Não entendi sua resposta. Digite novamente."
-
+    except Exception as e:
+        print(f"Erro ao resumir: {e}")
+        return text
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    incoming_msg = request.values.get("Body", "").strip()
-    telefone = request.values.get("From", "")
+    sender = request.form.get("From", "")
+    user = sender.replace("whatsapp:", "")
+    msg = request.form.get("Body", "").strip()
+    resp = MessagingResponse()
 
-    resposta = processar_mensagem(telefone, incoming_msg)
+    print(f"[DEBUG] Mensagem recebida de {user}: {msg}")
 
-    twilio_resp = MessagingResponse()
-    twilio_resp.message(resposta)
-    return Response(str(twilio_resp), mimetype="application/xml")
+    # Início da sessão ou timeout
+    if user not in sessions or (
+        datetime.datetime.now() - sessions[user].get("last_active", datetime.datetime.now())
+    ).seconds > TIMEOUT_MINUTES * 60:
+        reset_session(user)
+        sessions[user] = {"stage": "menu", "last_active": datetime.datetime.now()}
+        resp.message(
+            "👋 Olá! Bem-vindo ao Canal de Compliance.\n\n"
+            "Escolha uma opção:\n"
+            "1️⃣ Denúncia anônima\n"
+            "2️⃣ Denúncia identificada\n"
+            "3️⃣ Consultar protocolo\n"
+            "4️⃣ Encerrar atendimento"
+        )
+        return str(resp)
+
+    stage = sessions[user]["stage"]
+    sessions[user]["last_active"] = datetime.datetime.now()
+
+    # Fluxo de menu principal
+    if stage == "menu":
+        if msg == "1":
+            sessions[user]["stage"] = "denuncia_anonima"
+            resp.message("📝 Digite sua denúncia anônima:")
+        elif msg == "2":
+            sessions[user]["stage"] = "identificacao_nome"
+            resp.message("👤 Digite seu nome completo:")
+        elif msg == "3":
+            sessions[user]["stage"] = "consulta_protocolo"
+            resp.message("🔎 Informe o número do protocolo que deseja consultar:")
+        elif msg == "4":
+            reset_session(user)
+            resp.message("✅ Atendimento encerrado. Envie qualquer mensagem para começar novamente.")
+        else:
+            resp.message("❌ Opção inválida. Escolha:\n1️⃣ Denúncia anônima\n2️⃣ Denúncia identificada\n3️⃣ Consultar protocolo\n4️⃣ Encerrar atendimento")
+        return str(resp)
+
+    # Fluxo de denúncia anônima
+    if stage == "denuncia_anonima":
+        denuncia = msg
+        resumo = summarize_text(denuncia)
+        protocolo = generate_protocol()
+
+        try:
+            supabase.table("denuncias").insert({
+                "telefone": user,
+                "tipo": "anonima",
+                "denuncia": denuncia,
+                "resumo": resumo,
+                "protocolo": protocolo,
+                "created_at": datetime.datetime.utcnow().isoformat()
+            }).execute()
+            resp.message(f"✅ Sua denúncia foi registrada!\n📄 Protocolo: {protocolo}\nResumo: {resumo}")
+        except Exception as e:
+            print(f"Erro ao salvar denúncia: {e}")
+            resp.message("❌ Ocorreu um erro ao registrar sua denúncia. Tente novamente mais tarde.")
+
+        reset_session(user)
+        return str(resp)
+
+    # Fluxo de denúncia identificada
+    if stage == "identificacao_nome":
+        sessions[user]["nome"] = msg
+        sessions[user]["stage"] = "identificacao_email"
+        resp.message("📧 Digite seu e-mail:")
+        return str(resp)
+
+    if stage == "identificacao_email":
+        sessions[user]["email"] = msg
+        sessions[user]["stage"] = "denuncia_identificada"
+        resp.message("📝 Agora digite sua denúncia:")
+        return str(resp)
+
+    if stage == "denuncia_identificada":
+        denuncia = msg
+        resumo = summarize_text(denuncia)
+        protocolo = generate_protocol()
+
+        try:
+            supabase.table("denuncias").insert({
+                "telefone": user,
+                "tipo": "identificada",
+                "nome": sessions[user].get("nome"),
+                "email": sessions[user].get("email"),
+                "denuncia": denuncia,
+                "resumo": resumo,
+                "protocolo": protocolo,
+                "created_at": datetime.datetime.utcnow().isoformat()
+            }).execute()
+            resp.message(f"✅ Sua denúncia foi registrada!\n📄 Protocolo: {protocolo}\nResumo: {resumo}")
+        except Exception as e:
+            print(f"Erro ao salvar denúncia identificada: {e}")
+            resp.message("❌ Ocorreu um erro ao registrar sua denúncia. Tente novamente mais tarde.")
+
+        reset_session(user)
+        return str(resp)
+
+    # Fluxo de consulta de protocolo
+    if stage == "consulta_protocolo":
+        try:
+            data = supabase.table("denuncias").select("*").eq("protocolo", msg).execute()
+            if data.data:
+                d = data.data[0]
+                resp.message(
+                    f"📄 Detalhes da denúncia:\n"
+                    f"Protocolo: {d['protocolo']}\n"
+                    f"Tipo: {d['tipo']}\n"
+                    f"Resumo: {d['resumo']}"
+                )
+            else:
+                resp.message("⚠️ Nenhuma denúncia encontrada com esse protocolo.")
+        except Exception as e:
+            print(f"Erro ao consultar protocolo: {e}")
+            resp.message("❌ Erro ao consultar o protocolo.")
+
+        reset_session(user)
+        return str(resp)
+
+    # Fallback
+    resp.message("⚠️ Não entendi sua resposta. Digite uma opção válida do menu.")
+    return str(resp)
 
 
-@app.route("/")
-def index():
-    return "Compliance Bot rodando 🚀", 200
+@app.route("/", methods=["GET"])
+def home():
+    return "✅ Compliance Bot rodando no Render!", 200
 
 
 if __name__ == "__main__":
