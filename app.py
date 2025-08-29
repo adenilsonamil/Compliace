@@ -1,48 +1,38 @@
 import os
-import time
-import random
-import string
+import uuid
+from datetime import datetime, timedelta
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
-from openai import OpenAI
 from supabase import create_client, Client
+from openai import OpenAI
 
-# =========================
-# CONFIGURAÇÕES
-# =========================
+# 🔹 Configurações de ambiente
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+
+TWILIO_NUMBER = os.environ.get("TWILIO_NUMBER")
+
+# 🔹 Inicializa clientes
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+openai = OpenAI(api_key=OPENAI_API_KEY)
+
 app = Flask(__name__)
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-
-openai = OpenAI(api_key=OPENAI_API_KEY)
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-# Sessões de usuários
+# Sessões por usuário
 sessoes = {}
-TEMPO_EXPIRACAO = 300  # 5 minutos
+TEMPO_EXPIRACAO = timedelta(minutes=5)
 
 
-# =========================
-# FUNÇÕES AUXILIARES
-# =========================
+# ------------------ Funções Auxiliares ------------------
+
 def gerar_protocolo():
-    return ''.join(random.choices(string.digits, k=8))
+    return str(uuid.uuid4())[:8].upper()
 
 
-def resumo_denuncia(texto):
-    try:
-        resposta = openai.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "Resuma a denúncia em poucas linhas, de forma clara e objetiva."},
-                {"role": "user", "content": texto}
-            ]
-        )
-        return resposta.choices[0].message.content.strip()
-    except Exception as e:
-        return f"(Erro ao gerar resumo: {e})"
+def limpar_sessao(telefone):
+    if telefone in sessoes:
+        del sessoes[telefone]
 
 
 def salvar_denuncia(telefone, dados, resumo):
@@ -50,132 +40,91 @@ def salvar_denuncia(telefone, dados, resumo):
     try:
         supabase.table("denuncias").insert({
             "telefone": telefone,
-            "nome": dados.get("nome"),
-            "email": dados.get("email"),
-            "denuncia": dados.get("denuncia"),
-            "resumo": resumo,
-            "protocolo": protocolo
+            "nome": dados.get("nome") if not dados.get("anonimo") else None,
+            "descricao": dados.get("denuncia"),   # mapeado para coluna descricao
+            "protocolo": protocolo,
+            "tipo": "Anônimo" if dados.get("anonimo") else "Identificado",
+            "created_at": datetime.utcnow().isoformat()
         }).execute()
     except Exception as e:
         print(f"⚠️ Erro ao salvar no Supabase: {e}")
     return protocolo
 
 
-def buscar_por_protocolo(telefone, protocolo):
-    resultado = supabase.table("denuncias").select("*").eq("protocolo", protocolo).eq("telefone", telefone).execute()
-    if resultado.data:
-        return resultado.data[0]
-    return None
+def resumir_texto(texto):
+    try:
+        resposta = openai.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "Resuma a denúncia abaixo de forma clara e objetiva."},
+                {"role": "user", "content": texto}
+            ]
+        )
+        return resposta.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"⚠️ Erro ao resumir denúncia: {e}")
+        return texto  # fallback: retorna o próprio texto
 
 
-def resetar_sessao(telefone):
-    sessoes[telefone] = {"state": "inicio", "last_active": time.time()}
+# ------------------ Fluxo Principal ------------------
 
-
-def sessao_expirada(sessao):
-    return (time.time() - sessao.get("last_active", 0)) > TEMPO_EXPIRACAO
-
-
-# =========================
-# ROTA PRINCIPAL
-# =========================
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    incoming_msg = request.values.get("Body", "").strip()
-    from_number = request.values.get("From", "").replace("whatsapp:", "")
+@app.route("/whatsapp", methods=["POST"])
+def whatsapp_webhook():
+    telefone = request.form.get("From", "").replace("whatsapp:", "")
+    mensagem = request.form.get("Body", "").strip()
     resp = MessagingResponse()
+    resposta = resp.message()
 
-    # Carregar ou resetar sessão
-    sessao = sessoes.get(from_number, {"state": "inicio", "last_active": time.time()})
-    if sessao_expirada(sessao):
-        resetar_sessao(from_number)
-        sessao = sessoes[from_number]
+    # Verifica expiração da sessão
+    if telefone in sessoes:
+        ultima_interacao = sessoes[telefone].get("ultima_interacao")
+        if datetime.utcnow() - ultima_interacao > TEMPO_EXPIRACAO:
+            limpar_sessao(telefone)
+            resposta.body("⚠️ Sessão expirada. Envie sua denúncia novamente.")
+            return str(resp)
 
-    sessao["last_active"] = time.time()
-    state = sessao["state"]
+    # Nova denúncia
+    if telefone not in sessoes:
+        sessoes[telefone] = {"fase": "denuncia", "ultima_interacao": datetime.utcnow()}
+        resposta.body("📢 Bem-vindo ao Canal de Compliance.\n\nPor favor, descreva sua denúncia:")
+        return str(resp)
 
-    # =========================
-    # FLUXO DE CONVERSA
-    # =========================
-    if state == "inicio":
-        resp.message("👋 Olá! Bem-vindo ao Canal de Denúncias de Compliance.\n\n"
-                     "Você gostaria de realizar sua denúncia:\n"
-                     "1️⃣ De forma anônima\n"
-                     "2️⃣ Se identificando")
-        sessao["state"] = "escolha_tipo"
+    fase = sessoes[telefone]["fase"]
 
-    elif state == "escolha_tipo":
-        if incoming_msg == "1":
-            sessao["anonimo"] = True
-            resp.message("✅ Entendido. Sua denúncia será **anônima**.\n\nPor favor, descreva sua denúncia:")
-            sessao["state"] = "coletando_denuncia"
-        elif incoming_msg == "2":
-            sessao["anonimo"] = False
-            resp.message("✍️ Por favor, informe seu **nome completo**:")
-            sessao["state"] = "coletando_nome"
+    # 1️⃣ Receber a denúncia
+    if fase == "denuncia":
+        sessoes[telefone]["denuncia"] = mensagem
+        sessoes[telefone]["fase"] = "resumo"
+        sessoes[telefone]["ultima_interacao"] = datetime.utcnow()
+
+        resumo = resumir_texto(mensagem)
+        sessoes[telefone]["resumo"] = resumo
+
+        resposta.body(
+            f"📝 Aqui está o resumo da sua denúncia:\n\n{resumo}\n\nConfirma que está correto?\n1️⃣ Confirmar\n2️⃣ Corrigir"
+        )
+        return str(resp)
+
+    # 2️⃣ Correção do texto
+    elif fase == "resumo":
+        if mensagem == "1":  # Confirmar
+            protocolo = salvar_denuncia(telefone, sessoes[telefone], sessoes[telefone]["resumo"])
+            limpar_sessao(telefone)
+            resposta.body(
+                f"✅ Sua denúncia foi registrada com sucesso!\n\n📌 Protocolo: *{protocolo}*\n\n"
+                "Guarde este número para acompanhar sua denúncia futuramente."
+            )
+        elif mensagem == "2":  # Corrigir
+            sessoes[telefone]["fase"] = "denuncia"
+            resposta.body("✍️ Ok, por favor reescreva sua denúncia:")
         else:
-            resp.message("❌ Opção inválida. Digite 1 para anônima ou 2 para identificada.")
+            resposta.body("❌ Opção inválida. Responda com:\n1️⃣ Confirmar\n2️⃣ Corrigir")
+        return str(resp)
 
-    elif state == "coletando_nome":
-        sessao["nome"] = incoming_msg
-        resp.message("📧 Agora, informe seu **e-mail**:")
-        sessao["state"] = "coletando_email"
-
-    elif state == "coletando_email":
-        sessao["email"] = incoming_msg
-        resp.message("✅ Obrigado. Agora, por favor descreva sua denúncia:")
-        sessao["state"] = "coletando_denuncia"
-
-    elif state == "coletando_denuncia":
-        sessao["denuncia"] = incoming_msg
-        resumo = resumo_denuncia(incoming_msg)
-        sessao["resumo"] = resumo
-        resp.message(f"📋 Aqui está um resumo da sua denúncia:\n\n{resumo}\n\n"
-                     "Confirma que as informações estão corretas?\n"
-                     "1️⃣ Confirmar\n"
-                     "2️⃣ Corrigir")
-        sessao["state"] = "confirmando"
-
-    elif state == "confirmando":
-        if incoming_msg == "1":
-            protocolo = salvar_denuncia(from_number, sessao, sessao["resumo"])
-            resp.message(f"✅ Sua denúncia foi registrada com sucesso!\n\n"
-                         f"📋 Resumo: {sessao['resumo']}\n"
-                         f"📌 Protocolo: {protocolo}\n\n"
-                         "Guarde este número para futuras consultas digitando:\n"
-                         f"protocolo {protocolo}")
-            resetar_sessao(from_number)
-
-        elif incoming_msg == "2":
-            resp.message("🔄 Ok, vamos corrigir sua denúncia. Por favor, descreva novamente o problema.")
-            sessao["state"] = "coletando_denuncia"
-
-        else:
-            resp.message("❌ Resposta inválida. Digite 1 para confirmar ou 2 para corrigir.")
-
-    elif incoming_msg.lower().startswith("protocolo"):
-        partes = incoming_msg.split()
-        if len(partes) >= 2:
-            protocolo = partes[1]
-            denuncia = buscar_por_protocolo(from_number, protocolo)
-            if denuncia:
-                resp.message(f"📌 Protocolo: {protocolo}\n"
-                             f"📋 Resumo: {denuncia['resumo']}\n"
-                             f"📅 Denúncia registrada com sucesso.")
-            else:
-                resp.message("❌ Nenhuma denúncia encontrada para este protocolo ou número de telefone.")
-        else:
-            resp.message("❌ Por favor, informe o número do protocolo. Exemplo: protocolo 12345678")
-
-    else:
-        resp.message("🤖 Não entendi sua mensagem. Por favor, siga as instruções ou digite 'protocolo XXXXXXXX' para consultar sua denúncia.")
-
-    sessoes[from_number] = sessao
     return str(resp)
 
 
-# =========================
-# MAIN
-# =========================
+# ------------------ Início ------------------
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    app.run(host="0.0.0.0", port=5000)
