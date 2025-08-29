@@ -1,76 +1,85 @@
 import os
+import random
+import string
 import time
-import uuid
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
 from supabase import create_client, Client
 import openai
 
-# ================== CONFIG ==================
+# Configurações
 app = Flask(__name__)
 
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+openai.api_key = OPENAI_API_KEY
 
-openai.api_key = os.getenv("OPENAI_API_KEY")
+# Sessões temporárias
+sessions = {}
 
-# ================== ESTADO DE CONVERSAS ==================
-sessions = {}  # {"telefone": {"etapa": ..., "dados": {...}}}
-
+# Função para gerar protocolo
 def gerar_protocolo():
-    return str(uuid.uuid4())[:8].upper()
+    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
 
-# ================== ROTA PRINCIPAL ==================
 @app.route("/webhook", methods=["POST"])
 def webhook():
     incoming_msg = request.values.get("Body", "").strip()
-    from_number = request.values.get("From")
-
+    from_number = request.values.get("From", "").replace("whatsapp:", "")
     resp = MessagingResponse()
     msg = resp.message()
 
-    # Criar sessão caso não exista
+    # Recupera sessão
     if from_number not in sessions:
         sessions[from_number] = {"etapa": "inicio", "dados": {}}
-        msg.body("👋 Bem-vindo ao Canal de Denúncias de Compliance!")
-        time.sleep(5)
-        msg.body("Deseja prosseguir como:\n\n1️⃣ Anônimo\n2️⃣ Identificado")
-        return str(resp)
 
     etapa = sessions[from_number]["etapa"]
     dados = sessions[from_number]["dados"]
 
-    # ====== FLUXO PRINCIPAL ======
+    # Fluxo inicial
     if etapa == "inicio":
-        if incoming_msg == "1":
-            sessions[from_number]["etapa"] = "coletar_denuncia"
-            msg.body("✅ Ok! Você escolheu denúncia anônima.\n\nPor favor, descreva sua denúncia:")
-        elif incoming_msg == "2":
-            sessions[from_number]["etapa"] = "coletar_nome"
-            msg.body("✍️ Por favor, informe seu *nome completo*:")
-        else:
-            msg.body("⚠️ Responda apenas com 1️⃣ para Anônima ou 2️⃣ para Identificada.")
+        msg.body("👋 Bem-vindo ao Canal de Denúncias de Compliance!\n\n"
+                 "Deseja prosseguir como:\n\n"
+                 "1️⃣ Anônimo\n2️⃣ Identificado")
+        sessions[from_number]["etapa"] = "escolha"
     
+    # Escolha de anonimato ou identificado
+    elif etapa == "escolha":
+        if incoming_msg == "1":
+            dados["tipo"] = "anonimo"
+            msg.body("✅ Você escolheu denúncia anônima.\n\nPor favor, descreva sua denúncia:")
+            sessions[from_number]["etapa"] = "coletar_denuncia"
+        elif incoming_msg == "2":
+            dados["tipo"] = "identificado"
+            msg.body("✍️ Por favor, informe seu *nome completo*:")
+            sessions[from_number]["etapa"] = "coletar_nome"
+        else:
+            msg.body("⚠️ Resposta inválida. Digite `1` para Anônimo ou `2` para Identificado.")
+
+    # Coleta de nome (se identificado)
     elif etapa == "coletar_nome":
         dados["nome"] = incoming_msg
+        msg.body("📧 Agora, por favor, informe seu *e-mail*:")
         sessions[from_number]["etapa"] = "coletar_email"
-        msg.body("📧 Agora, informe seu *e-mail*:")
-    
+
+    # Coleta de e-mail (se identificado)
     elif etapa == "coletar_email":
         dados["email"] = incoming_msg
+        msg.body("✍️ Obrigado. Agora descreva sua denúncia:")
         sessions[from_number]["etapa"] = "coletar_denuncia"
-        msg.body("✅ Obrigado!\n\nAgora, descreva sua denúncia:")
-    
+
+    # Coleta da denúncia e resumo pela IA
     elif etapa == "coletar_denuncia":
         dados["descricao"] = incoming_msg
 
-        # Enviar para OpenAI para organizar
+        # Tenta resumir com IA
         try:
             completion = openai.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
-                    {"role": "system", "content": "Você é um assistente de compliance. Reorganize a denúncia de forma clara e objetiva."},
+                    {"role": "system", "content": "Você é um assistente de compliance. Reformule a denúncia em linguagem clara, objetiva e formal."},
                     {"role": "user", "content": incoming_msg}
                 ]
             )
@@ -80,40 +89,54 @@ def webhook():
 
         dados["resumo"] = resumo
         sessions[from_number]["etapa"] = "confirmar"
-        msg.body(f"📋 Aqui está o resumo da sua denúncia:\n\n{resumo}\n\nConfirma que está correto?\nResponda ✅ para confirmar ou ❌ para corrigir.")
-    
+        msg.body(f"📋 Aqui está o resumo da sua denúncia:\n\n"
+                 f"{resumo}\n\n"
+                 f"Confirma que está correto?\n\n"
+                 f"1️⃣ Confirmar\n2️⃣ Corrigir")
+
+    # Confirmação da denúncia
     elif etapa == "confirmar":
-        if incoming_msg.lower() in ["✅", "sim", "confirmo"]:
+        if incoming_msg == "1":
             protocolo = gerar_protocolo()
             dados["protocolo"] = protocolo
             dados["telefone"] = from_number
 
             supabase.table("denuncias").insert(dados).execute()
 
-            msg.body(f"🎉 Sua denúncia foi registrada com sucesso!\n\n📌 Protocolo: *{protocolo}*\n\nUse esse número para consultar o andamento.")
+            msg.body(f"🎉 Sua denúncia foi registrada com sucesso!\n\n"
+                     f"📌 Protocolo: *{protocolo}*\n\n"
+                     f"Use esse número para consultar o andamento.")
             sessions.pop(from_number)
-        elif incoming_msg.lower() in ["❌", "nao", "corrigir"]:
+        elif incoming_msg == "2":
             sessions[from_number]["etapa"] = "coletar_denuncia"
             msg.body("✍️ Ok, por favor reescreva sua denúncia:")
         else:
-            msg.body("⚠️ Responda apenas com ✅ para confirmar ou ❌ para corrigir.")
-    
-    else:
-        # Verificar se o usuário está consultando protocolo
-        if incoming_msg.upper().startswith("PROTOCOLO"):
-            protocolo = incoming_msg.split()[-1].strip().upper()
-            consulta = supabase.table("denuncias").select("*").eq("protocolo", protocolo).eq("telefone", from_number).execute()
+            msg.body("⚠️ Resposta inválida. Digite `1` para confirmar ou `2` para corrigir.")
 
-            if consulta.data:
-                denuncia = consulta.data[0]
-                msg.body(f"📌 Consulta do protocolo *{protocolo}*:\n\nResumo: {denuncia['resumo']}\nStatus: Em análise ✅")
+    # Consulta de protocolo
+    elif incoming_msg.lower().startswith("protocolo"):
+        parts = incoming_msg.split()
+        if len(parts) == 2:
+            protocolo = parts[1].upper()
+            result = supabase.table("denuncias").select("*").eq("protocolo", protocolo).eq("telefone", from_number).execute()
+            if result.data:
+                denuncia = result.data[0]
+                msg.body(f"📌 Consulta do protocolo *{protocolo}*:\n\n"
+                         f"Resumo: {denuncia['resumo']}\n"
+                         f"Tipo: {denuncia['tipo']}\n"
+                         f"Status: Em análise")
             else:
-                msg.body("⚠️ Protocolo não encontrado ou não pertence a este número.")
+                msg.body("❌ Nenhuma denúncia encontrada com esse protocolo vinculado ao seu número.")
         else:
-            msg.body("🤖 Estou aqui para denúncias de compliance.\nDigite novamente ou envie 'Ajuda' para mais informações.")
+            msg.body("⚠️ Para consultar, envie: Protocolo XXXXXXXX")
+
+    # Caso padrão - se não for denúncia ou protocolo
+    else:
+        msg.body("🤖 Este é o canal de denúncias de compliance.\n\n"
+                 "Digite `oi` para iniciar uma denúncia\n"
+                 "ou `Protocolo XXXXXXXX` para consultar.")
 
     return str(resp)
 
-# ================== MAIN ==================
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)), debug=True)
+    app.run(host="0.0.0.0", port=10000)
