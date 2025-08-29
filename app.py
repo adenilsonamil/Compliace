@@ -86,7 +86,7 @@ def webhook():
 
     if etapa == "consultar_protocolo":
         protocolo = msg
-        result = supabase.table("descricaos").select("*").eq("protocolo", protocolo).eq("telefone", telefone).execute()
+        result = supabase.table("denuncias").select("*").eq("protocolo", protocolo).eq("telefone", telefone).execute()
         if result.data:
             descricao = result.data[0]
             enviar_msg(telefone, f"📌 Protocolo {protocolo} encontrado:\n\nResumo: {descricao['resumo']}")
@@ -146,7 +146,7 @@ def webhook():
             dados["protocolo"] = protocolo
             dados["telefone"] = telefone
 
-            supabase.table("descricaos").insert(dados).execute()
+            supabase.table("denuncias").insert(dados).execute()
 
             enviar_msg(telefone, f"✅ Sua denúncia foi registrada com sucesso!\n"
                                  f"📌 Número de protocolo: {protocolo}\n\n"
