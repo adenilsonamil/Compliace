@@ -1,138 +1,146 @@
 import os
 import random
 import string
-from datetime import datetime, timedelta
-from flask import Flask, request
+import time
+from flask import Flask, request, Response
 from twilio.twiml.messaging_response import MessagingResponse
 from supabase import create_client, Client
+import openai
 
-# Configurações de ambiente
+# Configs
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 TWILIO_NUMBER = os.getenv("TWILIO_NUMBER")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# Inicializar Supabase
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+openai.api_key = OPENAI_API_KEY
 
-# Flask app
 app = Flask(__name__)
 
-# Sessões de usuários
-user_sessions = {}
+# Sessões temporárias
+sessions = {}
+SESSION_TIMEOUT = 300  # 5 minutos
 
-# Função para gerar protocolo
+
 def gerar_protocolo():
-    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=7))
+    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
 
-# Função para resetar sessão após inatividade
-def verificar_timeout(session):
-    if "last_active" in session:
-        if datetime.now() - session["last_active"] > timedelta(minutes=5):
-            return True
-    return False
 
-@app.route("/bot", methods=["POST"])
-def bot():
-    incoming_msg = request.values.get("Body", "").strip()
-    from_number = request.values.get("From", "")
-    response = MessagingResponse()
-
-    # Recuperar ou criar sessão
-    session = user_sessions.get(from_number, {"step": "inicio"})
-    if verificar_timeout(session):
-        session = {"step": "inicio"}
-    session["last_active"] = datetime.now()
-
-    # Fluxo inicial
-    if session["step"] == "inicio":
-        response.message(
-            "👋 Bem-vindo ao Canal de Denúncias de Compliance!\n\n"
-            "Deseja prosseguir como:\n\n"
-            "1️⃣ Anônimo\n"
-            "2️⃣ Identificado"
+def resumir_texto(texto):
+    try:
+        resp = openai.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "Resuma a denúncia de forma clara e objetiva."},
+                {"role": "user", "content": texto}
+            ],
+            max_tokens=60
         )
-        session["step"] = "tipo"
-        user_sessions[from_number] = session
-        return str(response)
+        return resp.choices[0].message.content.strip()
+    except Exception:
+        return texto  # fallback caso falhe a API
 
-    # Escolha do tipo
-    elif session["step"] == "tipo":
-        if incoming_msg == "1":
-            session["tipo"] = "anonimo"
-            session["step"] = "denuncia"
-            response.message("✅ Você escolheu denúncia anônima.\n\nPor favor, descreva sua denúncia:")
-        elif incoming_msg == "2":
-            session["tipo"] = "identificado"
-            session["step"] = "nome"
-            response.message("✍️ Por favor, informe seu nome:")
+
+def resetar_sessao(telefone):
+    if telefone in sessions:
+        del sessions[telefone]
+
+
+def processar_mensagem(telefone, msg):
+    agora = time.time()
+
+    # Reset automático após inatividade
+    if telefone in sessions and agora - sessions[telefone]["ultimo_tempo"] > SESSION_TIMEOUT:
+        resetar_sessao(telefone)
+
+    # Nova sessão
+    if telefone not in sessions:
+        sessions[telefone] = {"etapa": "inicio", "ultimo_tempo": agora}
+        return ("👋 Bem-vindo ao Canal de Denúncias de Compliance!\n"
+                "Deseja prosseguir como:\n\n"
+                "1️⃣ Anônimo\n"
+                "2️⃣ Identificado")
+
+    sessions[telefone]["ultimo_tempo"] = agora
+    etapa = sessions[telefone]["etapa"]
+
+    # Etapa escolha tipo
+    if etapa == "inicio":
+        if msg == "1":
+            sessions[telefone]["tipo"] = "anonimo"
+            sessions[telefone]["etapa"] = "descricao"
+            return "✅ Ok! Você escolheu denúncia **anônima**.\n\nPor favor, descreva sua denúncia:"
+        elif msg == "2":
+            sessions[telefone]["tipo"] = "identificado"
+            sessions[telefone]["etapa"] = "nome"
+            return "✍️ Por favor, digite seu nome:"
         else:
-            response.message("⚠️ Opção inválida. Responda com 1 para Anônimo ou 2 para Identificado.")
-        user_sessions[from_number] = session
-        return str(response)
+            return "⚠️ Escolha inválida. Digite *1* para Anônimo ou *2* para Identificado."
 
-    # Nome do denunciante
-    elif session["step"] == "nome":
-        session["nome"] = incoming_msg
-        session["step"] = "denuncia"
-        response.message("Por favor, descreva sua denúncia:")
-        user_sessions[from_number] = session
-        return str(response)
+    # Nome se identificado
+    if etapa == "nome":
+        sessions[telefone]["nome"] = msg
+        sessions[telefone]["etapa"] = "descricao"
+        return "✍️ Agora, descreva sua denúncia:"
 
-    # Descrição da denúncia
-    elif session["step"] == "denuncia":
-        session["denuncia"] = incoming_msg
-        session["step"] = "confirmar"
-        response.message(
-            f"📋 Aqui está o resumo da sua denúncia:\n\n{incoming_msg}\n\n"
-            "Confirma que está correto?\n\n"
-            "1️⃣ Confirmar\n"
-            "2️⃣ Corrigir"
-        )
-        user_sessions[from_number] = session
-        return str(response)
+    # Descrição
+    if etapa == "descricao":
+        resumo = resumir_texto(msg)
+        sessions[telefone]["descricao"] = resumo
+        sessions[telefone]["etapa"] = "confirmar"
+        return (f"📝 Aqui está o resumo da sua denúncia:\n\n{resumo}\n\n"
+                "Confirma que está correto?\n\n"
+                "1️⃣ Confirmar\n"
+                "2️⃣ Corrigir")
 
     # Confirmação
-    elif session["step"] == "confirmar":
-        if incoming_msg == "1":
+    if etapa == "confirmar":
+        if msg == "1":
             protocolo = gerar_protocolo()
+            sessions[telefone]["protocolo"] = protocolo
 
-            # Inserir no Supabase
-            supabase.table("denuncias").insert({
-                "protocolo": protocolo,
-                "tipo": session.get("tipo"),
-                "nome": session.get("nome"),
-                "descricao": session.get("denuncia"),
-                "telefone": from_number,
-                "created_at": datetime.now().isoformat()
-            }).execute()
+            # Salvar no Supabase
+            try:
+                supabase.table("denuncias").insert({
+                    "protocolo": protocolo,
+                    "tipo": sessions[telefone].get("tipo", "anonimo"),
+                    "nome": sessions[telefone].get("nome"),
+                    "descricao": sessions[telefone].get("descricao"),
+                    "telefone": telefone
+                }).execute()
+            except Exception as e:
+                return f"⚠️ Erro ao salvar denúncia: {e}"
 
-            # Resposta final com protocolo
-            response.message(
-                f"✅ Sua denúncia foi registrada com sucesso!\n\n"
-                f"📋 Protocolo: *{protocolo}*\n"
-                f"Você pode consultar sua denúncia posteriormente usando este número."
-            )
-
-            # Resetar sessão
-            user_sessions.pop(from_number, None)
-            return str(response)
-
-        elif incoming_msg == "2":
-            session["step"] = "denuncia"
-            response.message("✍️ Ok, por favor reescreva sua denúncia:")
-            user_sessions[from_number] = session
-            return str(response)
-
+            resetar_sessao(telefone)
+            return (f"✅ Sua denúncia foi registrada com sucesso!\n\n"
+                    f"📌 Protocolo: *{protocolo}*\n\n"
+                    "Guarde este número para futuras consultas.")
+        elif msg == "2":
+            sessions[telefone]["etapa"] = "descricao"
+            return "✍️ Ok, por favor reescreva sua denúncia:"
         else:
-            response.message("⚠️ Responda com 1 para Confirmar ou 2 para Corrigir.")
-            return str(response)
+            return "⚠️ Resposta inválida. Digite *1* para Confirmar ou *2* para Corrigir."
 
-    # Caso não bata com nenhum estado
-    else:
-        response.message("⚠️ Algo deu errado. Digite qualquer coisa para reiniciar o processo.")
-        user_sessions.pop(from_number, None)
-        return str(response)
+    return "⚠️ Não entendi sua resposta. Digite novamente."
+
+
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    incoming_msg = request.values.get("Body", "").strip()
+    telefone = request.values.get("From", "")
+
+    resposta = processar_mensagem(telefone, incoming_msg)
+
+    twilio_resp = MessagingResponse()
+    twilio_resp.message(resposta)
+    return Response(str(twilio_resp), mimetype="application/xml")
+
+
+@app.route("/")
+def index():
+    return "Compliance Bot rodando 🚀", 200
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    app.run(host="0.0.0.0", port=10000)
