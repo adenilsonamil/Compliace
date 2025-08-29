@@ -22,6 +22,7 @@ app = Flask(__name__)
 
 # Estado da conversa em memória
 user_sessions = {}
+SESSION_TIMEOUT = 300  # 5 minutos
 
 # Função IA para resumir denúncia
 def resumir_texto(texto):
@@ -38,6 +39,15 @@ def resumir_texto(texto):
         return f"(Falha ao resumir com IA: {str(e)})"
 
 
+def iniciar_sessao(from_number):
+    """Cria nova sessão e envia boas-vindas"""
+    user_sessions[from_number] = {
+        "step": "inicio",
+        "dados": {},
+        "last_active": time.time()
+    }
+
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
     incoming_msg = request.values.get("Body", "").strip()
@@ -46,16 +56,25 @@ def webhook():
     resp = MessagingResponse()
     msg = resp.message()
 
-    # Se não existe sessão, cria
-    if from_number not in user_sessions:
-        user_sessions[from_number] = {"step": "inicio", "dados": {}}
+    # Verifica se sessão existe e se não expirou
+    if from_number in user_sessions:
+        last_active = user_sessions[from_number].get("last_active", 0)
+        if time.time() - last_active > SESSION_TIMEOUT:
+            # Resetar a sessão se passou de 5 minutos
+            iniciar_sessao(from_number)
+            msg.body("⚠️ Sua sessão anterior expirou por inatividade.\n\n👋 Bem-vindo novamente ao Canal de Denúncias de Compliance.\n\nDeseja realizar uma denúncia:\n1️⃣ Anônima\n2️⃣ Identificada")
+            return str(resp)
+    else:
+        # Criar nova sessão
+        iniciar_sessao(from_number)
         msg.body("👋 Olá! Bem-vindo ao Canal de Denúncias de Compliance.\n\n"
-                 "Estamos aqui para ouvir você e tratar sua denúncia com sigilo e seriedade.")
-        time.sleep(5)
-        msg.body("Deseja realizar uma denúncia:\n1️⃣ Anônima\n2️⃣ Identificada")
+                 "Estamos aqui para ouvir você e tratar sua denúncia com sigilo e seriedade.\n\n"
+                 "Deseja realizar uma denúncia:\n1️⃣ Anônima\n2️⃣ Identificada")
         return str(resp)
 
+    # Atualiza último uso da sessão
     session = user_sessions[from_number]
+    session["last_active"] = time.time()
     step = session["step"]
 
     # Etapas da conversa
@@ -116,7 +135,7 @@ def webhook():
 
     elif step == "finalizado":
         # Consulta por protocolo
-        if len(incoming_msg) == 8:  # supondo protocolo de 8 caracteres
+        if len(incoming_msg) == 8:  # protocolo tem 8 caracteres
             result = supabase.table("denuncias").select("*").eq("protocolo", incoming_msg).eq("telefone", from_number).execute()
             if result.data:
                 denuncia = result.data[0]
