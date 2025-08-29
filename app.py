@@ -86,10 +86,10 @@ def webhook():
 
     if etapa == "consultar_protocolo":
         protocolo = msg
-        result = supabase.table("denuncias").select("*").eq("protocolo", protocolo).eq("telefone", telefone).execute()
+        result = supabase.table("descricaos").select("*").eq("protocolo", protocolo).eq("telefone", telefone).execute()
         if result.data:
-            denuncia = result.data[0]
-            enviar_msg(telefone, f"📌 Protocolo {protocolo} encontrado:\n\nResumo: {denuncia['resumo']}")
+            descricao = result.data[0]
+            enviar_msg(telefone, f"📌 Protocolo {protocolo} encontrado:\n\nResumo: {descricao['resumo']}")
         else:
             enviar_msg(telefone, "⚠️ Nenhum protocolo encontrado para o seu número.")
         reset_sessao(telefone)
@@ -98,12 +98,12 @@ def webhook():
     # Início do fluxo
     if etapa == "inicio":
         if msg == "1":
-            sessoes[telefone]["etapa"] = "coletar_denuncia"
-            sessoes[telefone]["dados"]["anonima"] = True
+            sessoes[telefone]["etapa"] = "coletar_descricao"
+            sessoes[telefone]["dados"]["anonimo"] = True
             enviar_msg(telefone, "✍️ Por favor, descreva sua denúncia:")
         elif msg == "2":
             sessoes[telefone]["etapa"] = "coletar_nome"
-            sessoes[telefone]["dados"]["anonima"] = False
+            sessoes[telefone]["dados"]["anonimo"] = False
             enviar_msg(telefone, "👤 Informe seu nome completo:")
         elif msg not in ["1", "2", "3", "4"]:
             enviar_msg(telefone, "⚠️ Opção inválida. Escolha:\n1️⃣ Anônima\n2️⃣ Identificada\n3️⃣ Consultar\n4️⃣ Encerrar")
@@ -118,12 +118,12 @@ def webhook():
 
     if etapa == "coletar_email":
         dados["email"] = msg
-        sessoes[telefone]["etapa"] = "coletar_denuncia"
+        sessoes[telefone]["etapa"] = "coletar_descricao"
         enviar_msg(telefone, "✍️ Por favor, descreva sua denúncia:")
         return "OK", 200
 
     # Coleta da denúncia
-    if etapa == "coletar_denuncia":
+    if etapa == "coletar_descricao":
         dados["descricao"] = msg
 
         # Resumir denúncia com IA
@@ -146,14 +146,14 @@ def webhook():
             dados["protocolo"] = protocolo
             dados["telefone"] = telefone
 
-            supabase.table("denuncias").insert(dados).execute()
+            supabase.table("descricaos").insert(dados).execute()
 
             enviar_msg(telefone, f"✅ Sua denúncia foi registrada com sucesso!\n"
                                  f"📌 Número de protocolo: {protocolo}\n\n"
                                  f"Guarde este número para futuras consultas.")
             reset_sessao(telefone)
         elif msg == "2":
-            sessoes[telefone]["etapa"] = "coletar_denuncia"
+            sessoes[telefone]["etapa"] = "coletar_descricao"
             enviar_msg(telefone, "✍️ Ok, descreva novamente sua denúncia:")
         else:
             enviar_msg(telefone, "⚠️ Resposta inválida. Digite 1️⃣ para confirmar ou 2️⃣ para corrigir.")
