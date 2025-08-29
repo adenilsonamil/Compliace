@@ -107,7 +107,8 @@ def webhook():
         result = supabase.table("denuncias").select("*").eq("protocolo", protocolo).eq("telefone", telefone).execute()
         if result.data:
             descricao = result.data[0]
-            enviar_msg(telefone, f"📌 Protocolo {protocolo} encontrado:\n\nResumo: {descricao.get('resumo', 'Sem resumo disponível')}")
+            enviar_msg(telefone, f"📌 Protocolo {protocolo} encontrado:\n\nResumo: {descricao.get('resumo', 'Sem resumo disponível')}\n"
+                                 f"Categoria: {descricao.get('categoria', 'Não classificada')}")
         else:
             enviar_msg(telefone, "⚠️ Nenhum protocolo encontrado para o seu número.")
         reset_sessao(telefone)
@@ -146,16 +147,42 @@ def webhook():
     if etapa == "coletar_descricao":
         dados["descricao"] = msg
 
-        # Resumir denúncia com IA
-        resumo = openai.chat.completions.create(
+        # Resumir e classificar denúncia com IA
+        resposta = openai.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[{"role": "system", "content": "Resuma a denúncia em até 3 linhas de forma clara e objetiva."},
-                      {"role": "user", "content": dados["descricao"]}]
+            messages=[
+                {"role": "system", "content": (
+                    "Você é um assistente de compliance. "
+                    "Sua tarefa é: "
+                    "1. Resumir a denúncia em até 3 linhas de forma clara e objetiva. "
+                    "2. Classificar a denúncia em UMA categoria da lista abaixo:\n"
+                    "- Assédio moral\n"
+                    "- Assédio sexual\n"
+                    "- Discriminação\n"
+                    "- Corrupção / Suborno\n"
+                    "- Fraude\n"
+                    "- Conflito de interesses\n"
+                    "- Outro"
+                )},
+                {"role": "user", "content": dados["descricao"]}
+            ]
         ).choices[0].message.content
 
+        # Separar resumo e categoria
+        resumo, categoria = "", "Outro"
+        if "Categoria:" in resposta:
+            partes = resposta.split("Categoria:")
+            resumo = partes[0].replace("Resumo:", "").strip()
+            categoria = partes[1].strip()
+        else:
+            resumo = resposta.strip()
+
         dados["resumo"] = resumo
+        dados["categoria"] = categoria
         sessoes[telefone]["etapa"] = "confirmar"
+
         enviar_msg(telefone, f"📋 Aqui está o resumo da sua denúncia:\n\n{resumo}\n\n"
+                             f"🗂️ Categoria sugerida: {categoria}\n\n"
                              "Digite 1️⃣ para confirmar ou 2️⃣ para corrigir.")
         return "OK", 200
 
