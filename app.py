@@ -66,6 +66,26 @@ def enviar_msg(para, texto):
     )
 
 
+def corrigir_texto(texto: str) -> str:
+    """Usa a IA para corrigir ortografia e gramática"""
+    try:
+        resposta = openai.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": (
+                    "Você é um assistente de revisão de texto. "
+                    "Corrija o texto do usuário apenas em ortografia e gramática, "
+                    "sem mudar o sentido ou acrescentar informações."
+                )},
+                {"role": "user", "content": texto}
+            ]
+        )
+        return resposta.choices[0].message.content.strip()
+    except Exception as e:
+        logging.error(f"Erro na correção do texto: {e}")
+        return texto
+
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
     telefone = request.form.get("From")
@@ -103,7 +123,7 @@ def webhook():
         return "OK", 200
 
     if etapa == "consultar_protocolo":
-        protocolo = msg
+        protocolo = corrigir_texto(msg)
         result = supabase.table("denuncias").select("*").eq("protocolo", protocolo).eq("telefone", telefone).execute()
         if result.data:
             denuncia = result.data[0]
@@ -133,20 +153,20 @@ def webhook():
 
     # Fluxo denúncia identificada
     if etapa == "coletar_nome":
-        dados["nome"] = msg
+        dados["nome"] = corrigir_texto(msg)
         sessoes[telefone]["etapa"] = "coletar_email"
         enviar_msg(telefone, "📧 Agora, informe seu e-mail:")
         return "OK", 200
 
     if etapa == "coletar_email":
-        dados["email"] = msg
+        dados["email"] = corrigir_texto(msg)
         sessoes[telefone]["etapa"] = "coletar_descricao"
         enviar_msg(telefone, "✍️ Por favor, descreva sua denúncia:")
         return "OK", 200
 
     # Coleta da denúncia
     if etapa == "coletar_descricao":
-        dados["descricao"] = msg
+        dados["descricao"] = corrigir_texto(msg)
 
         # 🔎 Validação da IA: é denúncia de compliance ou não?
         resposta_validacao = openai.chat.completions.create(
@@ -193,10 +213,10 @@ def webhook():
         resumo, categoria = "", "Outro"
         if "Categoria:" in resposta:
             partes = resposta.split("Categoria:")
-            resumo = partes[0].replace("Resumo:", "").strip()
-            categoria = partes[1].strip()
+            resumo = corrigir_texto(partes[0].replace("Resumo:", "").strip())
+            categoria = corrigir_texto(partes[1].strip())
         else:
-            resumo = resposta.strip()
+            resumo = corrigir_texto(resposta.strip())
 
         dados["resumo"] = resumo
         dados["categoria"] = categoria
@@ -220,43 +240,43 @@ def webhook():
 
     # Perguntas complementares
     if etapa == "coletar_data":
-        dados["data_fato"] = msg
+        dados["data_fato"] = corrigir_texto(msg)
         sessoes[telefone]["etapa"] = "coletar_local"
         enviar_msg(telefone, "📍 Onde aconteceu o fato (setor, filial, área, etc.)?")
         return "OK", 200
 
     if etapa == "coletar_local":
-        dados["local"] = msg
+        dados["local"] = corrigir_texto(msg)
         sessoes[telefone]["etapa"] = "coletar_envolvidos"
         enviar_msg(telefone, "👥 Quem estava envolvido? (pode informar cargos ou funções caso não saiba os nomes)")
         return "OK", 200
 
     if etapa == "coletar_envolvidos":
-        dados["envolvidos"] = msg
+        dados["envolvidos"] = corrigir_texto(msg)
         sessoes[telefone]["etapa"] = "coletar_testemunhas"
         enviar_msg(telefone, "👀 Havia outras pessoas que presenciaram o fato?")
         return "OK", 200
 
     if etapa == "coletar_testemunhas":
-        dados["testemunhas"] = msg
+        dados["testemunhas"] = corrigir_texto(msg)
         sessoes[telefone]["etapa"] = "coletar_evidencias"
         enviar_msg(telefone, "📎 Você possui documentos, fotos, vídeos ou outras evidências que possam ajudar?")
         return "OK", 200
 
     if etapa == "coletar_evidencias":
-        dados["evidencias"] = msg
+        dados["evidencias"] = corrigir_texto(msg)
         sessoes[telefone]["etapa"] = "coletar_frequencia"
         enviar_msg(telefone, "🔄 Esse fato ocorreu apenas uma vez ou é recorrente?")
         return "OK", 200
 
     if etapa == "coletar_frequencia":
-        dados["frequencia"] = msg
+        dados["frequencia"] = corrigir_texto(msg)
         sessoes[telefone]["etapa"] = "coletar_impacto"
         enviar_msg(telefone, "⚖️ Na sua visão, qual o impacto ou gravidade desse ocorrido?")
         return "OK", 200
 
     if etapa == "coletar_impacto":
-        dados["impacto"] = msg
+        dados["impacto"] = corrigir_texto(msg)
         sessoes[telefone]["etapa"] = "confirmar_final"
 
         # Se for anônimo, não mostra telefone/nome/email
