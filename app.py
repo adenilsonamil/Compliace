@@ -258,8 +258,35 @@ def webhook():
     if etapa == "coletar_impacto":
         dados["impacto"] = msg
         sessoes[telefone]["etapa"] = "confirmar_final"
-        enviar_msg(telefone, "✅ Todas as informações foram coletadas.\n\n"
-                             "Digite 1️⃣ para confirmar e registrar sua denúncia ou 2️⃣ para cancelar.")
+
+        # Se for anônimo, não mostra telefone/nome/email
+        telefone_str = telefone if not dados.get("anonimo") else "—"
+        nome_str = dados.get("nome", "—") if not dados.get("anonimo") else "—"
+        email_str = dados.get("email", "—") if not dados.get("anonimo") else "—"
+
+        # Monta resumo detalhado
+        resumo_detalhado = (
+            "📋 Resumo da sua denúncia:\n\n"
+            f"👤 Tipo: {'Anônima' if dados.get('anonimo') else 'Identificada'}\n"
+            f"Nome: {nome_str}\n"
+            f"E-mail: {email_str}\n"
+            f"Telefone: {telefone_str}\n\n"
+            f"📝 Descrição: {dados.get('descricao', '—')}\n"
+            f"📄 Resumo (IA): {dados.get('resumo', '—')}\n"
+            f"🗂️ Categoria: {dados.get('categoria', '—')}\n\n"
+            f"🗓️ Data do fato: {dados.get('data_fato', '—')}\n"
+            f"📍 Local: {dados.get('local', '—')}\n"
+            f"👥 Envolvidos: {dados.get('envolvidos', '—')}\n"
+            f"👀 Testemunhas: {dados.get('testemunhas', '—')}\n"
+            f"📎 Evidências: {dados.get('evidencias', '—')}\n"
+            f"🔄 Frequência: {dados.get('frequencia', '—')}\n"
+            f"⚖️ Impacto: {dados.get('impacto', '—')}\n\n"
+            "✅ Se estas informações estão corretas,\n"
+            "Digite 1️⃣ para confirmar e registrar sua denúncia\n"
+            "ou 2️⃣ para cancelar."
+        )
+
+        enviar_msg(telefone, resumo_detalhado)
         return "OK", 200
 
     # Confirmação final
