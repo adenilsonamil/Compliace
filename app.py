@@ -148,7 +148,28 @@ def webhook():
     if etapa == "coletar_descricao":
         dados["descricao"] = msg
 
-        # Resumir e classificar denúncia com IA
+        # 🔎 Validação da IA: é denúncia de compliance ou não?
+        resposta_validacao = openai.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": (
+                    "Você é um analista de compliance. "
+                    "Classifique o texto do usuário como:\n"
+                    "- 'denuncia' → se for um caso de compliance (assédio, corrupção, fraude, discriminação, conflito de interesses etc.)\n"
+                    "- 'nao_denuncia' → se for apenas reclamação, sugestão, elogio ou outro assunto que não é de compliance."
+                )},
+                {"role": "user", "content": dados["descricao"]}
+            ]
+        ).choices[0].message.content.strip().lower()
+
+        if "nao_denuncia" in resposta_validacao:
+            sessoes[telefone]["etapa"] = "confirmar_denuncia"
+            enviar_msg(telefone, "⚠️ Sua mensagem parece ser uma *reclamação, elogio ou sugestão*.\n\n"
+                                 "👉 Estes casos devem ser tratados pelo canal adequado: ouvidoria@portocentrooeste.com.br\n\n"
+                                 "❓ Deseja realmente registrar como denúncia de compliance? (sim/não)")
+            return "OK", 200
+
+        # Se for denúncia válida, segue com IA para resumo + categoria
         resposta = openai.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
@@ -185,6 +206,16 @@ def webhook():
                              f"🗂️ Categoria sugerida: {categoria}\n\n"
                              "Agora precisamos de mais informações.\n"
                              "🗓️ Quando o fato ocorreu (data e horário aproximados)?")
+        return "OK", 200
+
+    # Caso IA tenha dito que não é denúncia
+    if etapa == "confirmar_denuncia":
+        if msg.lower() == "sim":
+            sessoes[telefone]["etapa"] = "coletar_descricao"
+            enviar_msg(telefone, "✍️ Por favor, descreva sua denúncia:")
+        else:
+            reset_sessao(telefone)
+            enviar_msg(telefone, "✅ Atendimento encerrado. Obrigado por utilizar o canal.")
         return "OK", 200
 
     # Perguntas complementares
