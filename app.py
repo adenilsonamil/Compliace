@@ -86,35 +86,6 @@ def corrigir_texto(texto: str) -> str:
         return texto
 
 
-def montar_resumo(dados, telefone):
-    """Monta o resumo final com base nos dados coletados"""
-    telefone_str = telefone if not dados.get("anonimo") else "—"
-    nome_str = dados.get("nome", "—") if not dados.get("anonimo") else "—"
-    email_str = dados.get("email", "—") if not dados.get("anonimo") else "—"
-
-    return (
-        "📋 Resumo da sua denúncia:\n\n"
-        f"👤 Tipo: {'Anônima' if dados.get('anonimo') else 'Identificada'}\n"
-        f"Nome: {nome_str}\n"
-        f"E-mail: {email_str}\n"
-        f"Telefone: {telefone_str}\n\n"
-        f"📝 Descrição: {dados.get('descricao', '—')}\n"
-        f"📄 Resumo (IA): {dados.get('resumo', '—')}\n"
-        f"🗂️ Categoria: {dados.get('categoria', '—')}\n\n"
-        f"🗓️ Data do fato: {dados.get('data_fato', '—')}\n"
-        f"📍 Local: {dados.get('local', '—')}\n"
-        f"👥 Envolvidos: {dados.get('envolvidos', '—')}\n"
-        f"👀 Testemunhas: {dados.get('testemunhas', '—')}\n"
-        f"📎 Evidências: {dados.get('evidencias', '—')}\n"
-        f"🔄 Frequência: {dados.get('frequencia', '—')}\n"
-        f"⚖️ Impacto: {dados.get('impacto', '—')}\n\n"
-        "✅ Se estas informações estão corretas:\n"
-        "Digite 1️⃣ para confirmar e registrar sua denúncia\n"
-        "Digite 2️⃣ para corrigir alguma informação\n"
-        "Digite 3️⃣ para cancelar."
-    )
-
-
 @app.route("/webhook", methods=["POST"])
 def webhook():
     telefone = request.form.get("From")
@@ -204,8 +175,8 @@ def webhook():
                 {"role": "system", "content": (
                     "Você é um analista de compliance. "
                     "Classifique o texto do usuário como:\n"
-                    "- 'denuncia' → se for um caso de compliance (assédio, corrupção, fraude, discriminação, conflito de interesses etc.)\n"
-                    "- 'nao_denuncia' → se for apenas reclamação, sugestão, elogio ou outro assunto que não é de compliance."
+                    "- 'denuncia' → se for um caso de compliance\n"
+                    "- 'nao_denuncia' → se for apenas reclamação/sugestão/elogio."
                 )},
                 {"role": "user", "content": dados["descricao"]}
             ]
@@ -225,15 +196,8 @@ def webhook():
                 {"role": "system", "content": (
                     "Você é um assistente de compliance. "
                     "Sua tarefa é: "
-                    "1. Resumir a denúncia em até 3 linhas de forma clara e objetiva. "
-                    "2. Classificar a denúncia em UMA categoria da lista abaixo:\n"
-                    "- Assédio moral\n"
-                    "- Assédio sexual\n"
-                    "- Discriminação\n"
-                    "- Corrupção / Suborno\n"
-                    "- Fraude\n"
-                    "- Conflito de interesses\n"
-                    "- Outro"
+                    "1. Resumir a denúncia em até 3 linhas. "
+                    "2. Classificar em UMA categoria: Assédio moral, Assédio sexual, Discriminação, Corrupção / Suborno, Fraude, Conflito de interesses, Outro"
                 )},
                 {"role": "user", "content": dados["descricao"]}
             ]
@@ -277,7 +241,7 @@ def webhook():
     if etapa == "coletar_local":
         dados["local"] = corrigir_texto(msg)
         sessoes[telefone]["etapa"] = "coletar_envolvidos"
-        enviar_msg(telefone, "👥 Quem estava envolvido? (pode informar cargos ou funções caso não saiba os nomes)")
+        enviar_msg(telefone, "👥 Quem estava envolvido?")
         return "OK", 200
 
     if etapa == "coletar_envolvidos":
@@ -289,7 +253,7 @@ def webhook():
     if etapa == "coletar_testemunhas":
         dados["testemunhas"] = corrigir_texto(msg)
         sessoes[telefone]["etapa"] = "coletar_evidencias"
-        enviar_msg(telefone, "📎 Você possui documentos, fotos, vídeos ou outras evidências que possam ajudar?")
+        enviar_msg(telefone, "📎 Você possui documentos, fotos, vídeos ou outras evidências?")
         return "OK", 200
 
     if etapa == "coletar_evidencias":
@@ -308,11 +272,38 @@ def webhook():
         dados["impacto"] = corrigir_texto(msg)
         sessoes[telefone]["etapa"] = "confirmar_final"
 
-        resumo_detalhado = montar_resumo(dados, telefone)
+        # Se for anônimo, não mostra telefone/nome/email
+        telefone_str = telefone if not dados.get("anonimo") else "—"
+        nome_str = dados.get("nome", "—") if not dados.get("anonimo") else "—"
+        email_str = dados.get("email", "—") if not dados.get("anonimo") else "—"
+
+        # Monta resumo detalhado
+        resumo_detalhado = (
+            "📋 Resumo da sua denúncia:\n\n"
+            f"👤 Tipo: {'Anônima' if dados.get('anonimo') else 'Identificada'}\n"
+            f"Nome: {nome_str}\n"
+            f"E-mail: {email_str}\n"
+            f"Telefone: {telefone_str}\n\n"
+            f"📝 Descrição: {dados.get('descricao', '—')}\n"
+            f"📄 Resumo (IA): {dados.get('resumo', '—')}\n"
+            f"🗂️ Categoria: {dados.get('categoria', '—')}\n\n"
+            f"🗓️ Data do fato: {dados.get('data_fato', '—')}\n"
+            f"📍 Local: {dados.get('local', '—')}\n"
+            f"👥 Envolvidos: {dados.get('envolvidos', '—')}\n"
+            f"👀 Testemunhas: {dados.get('testemunhas', '—')}\n"
+            f"📎 Evidências: {dados.get('evidencias', '—')}\n"
+            f"🔄 Frequência: {dados.get('frequencia', '—')}\n"
+            f"⚖️ Impacto: {dados.get('impacto', '—')}\n\n"
+            "✅ Se estas informações estão corretas,\n"
+            "Digite 1️⃣ para confirmar e registrar sua denúncia\n"
+            "Digite 2️⃣ para corrigir alguma informação\n"
+            "Digite 3️⃣ para cancelar."
+        )
+
         enviar_msg(telefone, resumo_detalhado)
         return "OK", 200
 
-    # Confirmação final com opção de corrigir
+    # Confirmação final ou correção
     if etapa == "confirmar_final":
         if msg == "1":
             protocolo = str(uuid.uuid4())[:8]
@@ -328,55 +319,42 @@ def webhook():
 
         elif msg == "2":
             sessoes[telefone]["etapa"] = "corrigir_campo"
-            enviar_msg(telefone, "Qual informação você deseja corrigir?\n"
-                                 "1️⃣ Nome\n2️⃣ E-mail\n3️⃣ Descrição\n4️⃣ Data\n5️⃣ Local\n"
-                                 "6️⃣ Envolvidos\n7️⃣ Testemunhas\n8️⃣ Evidências\n9️⃣ Frequência\n🔟 Impacto")
+            campos = ["Descrição", "Data do fato", "Local", "Envolvidos", "Testemunhas", "Evidências", "Frequência", "Impacto"]
+            if not dados.get("anonimo"):
+                campos = ["Nome", "E-mail"] + campos
+            enviar_msg(telefone, "✏️ Qual campo deseja corrigir?\n" +
+                       "\n".join([f"{i+1}️⃣ {c}" for i, c in enumerate(campos)]))
+            sessoes[telefone]["dados"]["campos_disponiveis"] = campos
 
         elif msg == "3":
             reset_sessao(telefone)
             enviar_msg(telefone, "❌ Registro cancelado. Digite qualquer mensagem para começar de novo.")
+
         else:
-            enviar_msg(telefone, "⚠️ Resposta inválida. Digite 1️⃣ Confirmar, 2️⃣ Corrigir ou 3️⃣ Cancelar.")
+            enviar_msg(telefone, "⚠️ Resposta inválida. Digite 1️⃣ confirmar, 2️⃣ corrigir, ou 3️⃣ cancelar.")
         return "OK", 200
 
-    # Correção de campos específicos
     if etapa == "corrigir_campo":
-        mapa = {
-            "1": "nome",
-            "2": "email",
-            "3": "descricao",
-            "4": "data_fato",
-            "5": "local",
-            "6": "envolvidos",
-            "7": "testemunhas",
-            "8": "evidencias",
-            "9": "frequencia",
-            "10": "impacto"
-        }
-        if msg in mapa:
-            sessoes[telefone]["campo_corrigir"] = mapa[msg]
-            sessoes[telefone]["etapa"] = "corrigir_valor"
-            enviar_msg(telefone, f"✍️ Informe o novo valor para {mapa[msg]}:")
-        else:
-            enviar_msg(telefone, "⚠️ Opção inválida. Escolha um número de 1 a 10.")
+        campos = dados.get("campos_disponiveis", [])
+        try:
+            escolha = int(msg) - 1
+            if escolha < 0 or escolha >= len(campos):
+                enviar_msg(telefone, "⚠️ Escolha inválida. Tente novamente.")
+                return "OK", 200
+            campo_escolhido = campos[escolha].lower().replace(" ", "_")
+            sessoes[telefone]["etapa"] = f"corrigir_{campo_escolhido}"
+            enviar_msg(telefone, f"✍️ Informe o novo valor para {campos[escolha]}:")
+        except ValueError:
+            enviar_msg(telefone, "⚠️ Digite o número do campo que deseja corrigir.")
         return "OK", 200
 
-    if etapa == "corrigir_valor":
-        campo = sessoes[telefone].get("campo_corrigir")
-        if campo:
-            dados[campo] = corrigir_texto(msg)
+    if etapa.startswith("corrigir_"):
+        campo = etapa.replace("corrigir_", "")
+        dados[campo] = corrigir_texto(msg)
         sessoes[telefone]["etapa"] = "confirmar_final"
-        resumo_detalhado = montar_resumo(dados, telefone)
-        enviar_msg(telefone, resumo_detalhado)
-        return "OK", 200
-
-    return "OK", 200
-
-
-@app.route("/", methods=["GET"])
-def home():
-    return "✅ Compliance Bot está rodando!", 200
-
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+        enviar_msg(telefone, "✅ Informação atualizada com sucesso!\n")
+        # Regera o resumo atualizado
+        telefone_str = telefone if not dados.get("anonimo") else "—"
+        nome_str = dados.get("nome", "—") if not dados.get("anonimo") else "—"
+        email_str = dados.get("email", "—") if not dados.get("anonimo") else "—"
+        resumo_detalhado
