@@ -63,32 +63,19 @@ def enviar_msg(para, texto):
     twilio_client.messages.create(from_=TWILIO_NUMBER, to=para, body=texto)
 
 
-def interpretar_resposta(etapa: str, texto: str) -> str:
-    """IA valida se a resposta condiz com a pergunta e corrige português"""
+def corrigir_texto(texto: str) -> str:
+    """IA corrige ortografia/gramática sem mudar o sentido"""
     try:
-        prompt = (
-            f"Você é um assistente de compliance. "
-            f"O usuário respondeu: '{texto}' para a etapa '{etapa}'. "
-            f"1. Corrija ortografia e gramática. "
-            f"2. Valide se a resposta condiz com a pergunta: "
-            f"- Se etapa=coletar_data → deve ser data/tempo. "
-            f"- Se etapa=coletar_local → deve ser local/setor. "
-            f"- Se etapa=coletar_envolvidos/testemunhas → nomes ou funções. "
-            f"- Se etapa=coletar_impacto → impacto/gravidade. "
-            f"3. Se não fizer sentido, responda 'INVALIDO'. "
-            f"4. Caso contrário, devolva apenas o texto corrigido."
-        )
-
         resposta = openai.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[{"role": "system", "content": prompt}]
+            messages=[
+                {"role": "system", "content": "Corrija ortografia e gramática, sem mudar o sentido."},
+                {"role": "user", "content": texto}
+            ]
         )
-        conteudo = resposta.choices[0].message.content.strip()
-        if "INVALIDO" in conteudo.upper():
-            return None
-        return conteudo
+        return resposta.choices[0].message.content.strip()
     except Exception as e:
-        logging.error(f"Erro na interpretação: {e}")
+        logging.error(f"Erro ao corrigir texto: {e}")
         return texto
 
 # ======================================
@@ -157,11 +144,7 @@ def webhook():
 
     # Identificada
     if etapa == "coletar_nome":
-        resp = interpretar_resposta("coletar_nome", msg)
-        if not resp: 
-            enviar_msg(telefone, "⚠️ Parece que não é um nome válido. Digite novamente:")
-            return "OK", 200
-        dados["nome"] = resp
+        dados["nome"] = corrigir_texto(msg)
         sessoes[telefone]["etapa"] = "coletar_email"
         enviar_msg(telefone, "📧 Informe seu e-mail:")
         return "OK", 200
@@ -174,21 +157,7 @@ def webhook():
 
     # Descrição + IA
     if etapa == "coletar_descricao":
-        dados["descricao"] = interpretar_resposta("coletar_descricao", msg) or msg
-
-        # IA valida se é denúncia
-        validacao = openai.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role":"system","content":"Classifique como 'denuncia' ou 'nao_denuncia'."},
-                      {"role":"user","content":dados["descricao"]}]
-        ).choices[0].message.content.strip().lower()
-
-        if "nao_denuncia" in validacao:
-            sessoes[telefone]["etapa"] = "confirmar_denuncia"
-            enviar_msg(telefone, "⚠️ Sua mensagem parece ser uma reclamação/elogio/sugestão.\n"
-                                 "Canal adequado: ouvidoria@portocentrooeste.com.br\n\n"
-                                 "Deseja mesmo registrar como denúncia de compliance? (sim/não)")
-            return "OK", 200
+        dados["descricao"] = corrigir_texto(msg)
 
         # IA resume e categoriza
         resposta = openai.chat.completions.create(
@@ -202,25 +171,16 @@ def webhook():
             partes = resposta.split("Categoria:")
             resumo = partes[0].replace("Resumo:","").strip()
             categoria = partes[1].strip()
-        dados["resumo"] = resumo
-        dados["categoria"] = categoria
+        dados["resumo"] = corrigir_texto(resumo)
+        dados["categoria"] = corrigir_texto(categoria)
 
         sessoes[telefone]["etapa"] = "coletar_data"
-        enviar_msg(telefone, f"📋 Resumo da denúncia:\n{resumo}\n\n"
-                             f"Categoria sugerida: {categoria}\n\n"
+        enviar_msg(telefone, f"📋 Resumo da denúncia:\n{dados['resumo']}\n\n"
+                             f"Categoria sugerida: {dados['categoria']}\n\n"
                              "🗓️ Quando ocorreu o fato?")
         return "OK", 200
 
-    if etapa == "confirmar_denuncia":
-        if msg.lower()=="sim":
-            sessoes[telefone]["etapa"]="coletar_descricao"
-            enviar_msg(telefone,"✍️ Descreva sua denúncia:")
-        else:
-            reset_sessao(telefone)
-            enviar_msg(telefone,"✅ Atendimento encerrado.")
-        return "OK", 200
-
-    # Campos complementares
+    # Perguntas complementares
     perguntas = {
         "coletar_data":("data_fato","📍 Onde ocorreu o fato?"),
         "coletar_local":("local","👥 Quem estava envolvido?"),
@@ -233,11 +193,7 @@ def webhook():
 
     if etapa in perguntas:
         campo, prox = perguntas[etapa]
-        resp = interpretar_resposta(etapa, msg)
-        if not resp:
-            enviar_msg(telefone,"⚠️ Resposta não parece adequada, tente novamente:")
-            return "OK",200
-        dados[campo]=resp
+        dados[campo] = corrigir_texto(msg)
 
         if prox=="FINAL":
             sessoes[telefone]["etapa"]="confirmar_final"
@@ -269,7 +225,7 @@ def webhook():
             enviar_msg(telefone,prox)
         return "OK",200
 
-    # Correção de campos
+    # Confirmação final
     if etapa=="confirmar_final":
         if msg=="1":
             protocolo=str(uuid.uuid4())[:8]
@@ -306,7 +262,7 @@ def webhook():
 
     if etapa=="corrigir_valor":
         campo=sessoes[telefone]["campo_corrigir"]
-        dados[campo]=interpretar_resposta(campo,msg) or msg
+        dados[campo]=corrigir_texto(msg)
         sessoes[telefone]["etapa"]="confirmar_final"
         enviar_msg(telefone,"✅ Informação atualizada. Veja o resumo novamente digitando qualquer tecla.")
         return "OK",200
