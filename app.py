@@ -123,7 +123,7 @@ def webhook():
         return "OK", 200
 
     if etapa == "consultar_protocolo":
-        protocolo = corrigir_texto(msg)
+        protocolo = msg.strip()  # 🔑 Não passa mais pela IA
         result = supabase.table("denuncias").select("*").eq("protocolo", protocolo).eq("telefone", telefone).execute()
         if result.data:
             denuncia = result.data[0]
@@ -230,27 +230,12 @@ def webhook():
 
     # Caso IA tenha dito que não é denúncia
     if etapa == "confirmar_denuncia":
-        if msg.lower() == "sim" or msg == "1":
+        if msg.lower() == "sim":
             sessoes[telefone]["etapa"] = "coletar_descricao"
             enviar_msg(telefone, "✍️ Por favor, descreva sua denúncia:")
-        elif msg.lower() == "não" or msg.lower() == "nao" or msg == "2":
-            enviar_msg(telefone, "✅ Sua mensagem foi registrada como *não denúncia*.\n\n"
-                                 "Deseja registrar uma denúncia de compliance?\n"
-                                 "1️⃣ Sim\n2️⃣ Não")
-            sessoes[telefone]["etapa"] = "reinicio_denuncia"
         else:
-            enviar_msg(telefone, "⚠️ Resposta inválida. Digite 'sim' ou 'não'.")
-        return "OK", 200
-
-    if etapa == "reinicio_denuncia":
-        if msg == "1":
-            sessoes[telefone]["etapa"] = "coletar_descricao"
-            enviar_msg(telefone, "✍️ Por favor, descreva sua denúncia:")
-        elif msg == "2":
             reset_sessao(telefone)
             enviar_msg(telefone, "✅ Atendimento encerrado. Obrigado por utilizar o canal.")
-        else:
-            enviar_msg(telefone, "⚠️ Opção inválida. Digite 1️⃣ para sim ou 2️⃣ para não.")
         return "OK", 200
 
     # Perguntas complementares
