@@ -80,7 +80,7 @@ def webhook():
     incoming_msg = request.form.get("Body").strip()
     estado = user_states.get(user_number, {"step": "inicio", "dados": {}})
 
-    # Reiniciar
+    # Encerrar
     if incoming_msg == "4":
         enviar_whatsapp(user_number, "✅ Atendimento encerrado. Obrigado por utilizar nosso canal.")
         user_states.pop(user_number, None)
@@ -98,29 +98,44 @@ def webhook():
             enviar_whatsapp(user_number, "👤 Informe seu nome completo:")
         elif incoming_msg == "3":
             estado["step"] = "consulta_protocolo"
-            enviar_whatsapp(user_number, "🔎 Digite o protocolo para consultar sua denúncia:")
+            enviar_whatsapp(user_number, "🔎 Digite o protocolo da sua denúncia:")
         else:
             enviar_whatsapp(user_number, "⚠️ Opção inválida. Digite 1, 2, 3 ou 4.")
         user_states[user_number] = estado
         return "OK", 200
 
-    # Consulta de protocolo
+    # ==============================
+    # Consulta de protocolo + senha
+    # ==============================
     if estado["step"] == "consulta_protocolo":
-        protocolo = incoming_msg
+        estado["dados"]["protocolo"] = incoming_msg
+        estado["step"] = "consulta_senha"
+        enviar_whatsapp(user_number, "🔑 Digite a senha associada ao protocolo:")
+        user_states[user_number] = estado
+        return "OK", 200
+
+    if estado["step"] == "consulta_senha":
+        protocolo = estado["dados"]["protocolo"]
+        senha_digitada = incoming_msg
         try:
             result = supabase.table("denuncias").select("*").eq("protocolo", protocolo).execute()
             if result.data:
                 denuncia = result.data[0]
-                resposta = (
-                    f"📋 Denúncia encontrada:\n"
-                    f"👤 Tipo: {'Anônima' if denuncia['anonimo'] else 'Identificada'}\n"
-                    f"📝 Descrição: {denuncia['descricao']}\n"
-                    f"📌 Status: {denuncia['status'] or 'Em análise'}"
-                )
+                senha_hash = denuncia.get("senha")
+                if senha_hash and check_password_hash(senha_hash, senha_digitada):
+                    resposta = (
+                        f"📋 Consulta da denúncia:\n"
+                        f"📌 Protocolo: {protocolo}\n"
+                        f"📊 Status: {denuncia.get('status','Em análise')}\n"
+                        f"📝 Descrição: {denuncia.get('descricao','')[:120]}..."
+                    )
+                else:
+                    resposta = "❌ Protocolo ou senha inválidos."
             else:
-                resposta = "❌ Nenhuma denúncia encontrada para esse protocolo."
+                resposta = "❌ Nenhuma denúncia encontrada com esse protocolo."
         except Exception as e:
-            resposta = f"⚠️ Erro ao consultar protocolo: {e}"
+            resposta = f"⚠️ Erro ao consultar denúncia: {e}"
+
         enviar_whatsapp(user_number, resposta)
         user_states.pop(user_number, None)
         return "OK", 200
@@ -133,7 +148,7 @@ def webhook():
         user_states[user_number] = estado
         return "OK", 200
 
-    # E-mail
+    # Email
     if estado["step"] == "email":
         estado["dados"]["email"] = incoming_msg
         estado["step"] = "telefone"
@@ -159,6 +174,8 @@ def webhook():
 
         estado["dados"]["protocolo"] = protocolo
         estado["dados"]["senha"] = senha_hash
+        estado["dados"]["status"] = "Recebida"
+
         resumo = (
             f"📋 Resumo da denúncia:\n\n"
             f"👤 Tipo: {'Anônima' if estado['dados'].get('anonimo') else 'Identificada'}\n"
@@ -169,7 +186,7 @@ def webhook():
             f"Digite 3️⃣ para cancelar."
         )
         enviar_whatsapp(user_number, resumo)
-        estado["senha_plana"] = senha  # para mostrar ao usuário no final
+        estado["senha_plana"] = senha
         user_states[user_number] = estado
         return "OK", 200
 
