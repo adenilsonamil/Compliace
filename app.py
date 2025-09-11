@@ -1,98 +1,89 @@
 import os
 import logging
+import secrets
+import bcrypt
 from flask import Flask, request
 from twilio.rest import Client
-from supabase import create_client
-from cryptography.fernet import Fernet
+from supabase import create_client, Client as SupabaseClient
 import openai
-from uuid import uuid4
+from datetime import datetime
 
-# -------------------------------------------------
-# Configuração de logging seguro
-# -------------------------------------------------
+# ========================
+# Configurações
+# ========================
 logging.basicConfig(level=logging.DEBUG)
-logger = logging.getLogger(__name__)
+app = Flask(__name__)
 
-# -------------------------------------------------
-# Variáveis de ambiente (Render ou .env local)
-# -------------------------------------------------
-required_env_vars = [
-    "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_PHONE_NUMBER",
-    "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY",
-    "OPENAI_API_KEY", "ENCRYPTION_KEY"
-]
-
-for var in required_env_vars:
-    if not os.getenv(var):
-        raise ValueError(f"❌ Variável de ambiente obrigatória não definida: {var}")
-
+# Variáveis de ambiente
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
-TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
+TWILIO_WHATSAPP_NUMBER = os.getenv("TWILIO_WHATSAPP_NUMBER")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")
 
-# -------------------------------------------------
-# Inicializações
-# -------------------------------------------------
-app = Flask(__name__)
+# Clientes
 twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+supabase: SupabaseClient = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 openai.api_key = OPENAI_API_KEY
-fernet = Fernet(ENCRYPTION_KEY)
 
-conversation_state = {}
+# Estados de conversa
+conversas = {}
 
-# -------------------------------------------------
+# ========================
 # Funções auxiliares
-# -------------------------------------------------
-def encrypt(value: str) -> str:
-    return fernet.encrypt(value.encode()).decode() if value else None
-
-def send_message(to, body):
-    logger.debug(f"Enviando para {to}: {body}")
+# ========================
+def enviar_mensagem(to, body):
+    logging.debug(f"Enviando para {to}: {body}")
     twilio_client.messages.create(
-        body=body,
-        from_=f"whatsapp:{TWILIO_PHONE_NUMBER}",
-        to=to
+        from_=f"whatsapp:{TWILIO_WHATSAPP_NUMBER}",
+        to=to,
+        body=body
     )
 
 def corrigir_texto(texto: str) -> str:
     try:
-        resp = openai.chat.completions.create(
+        response = openai.ChatCompletion.create(
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": "Você é um assistente de revisão de texto. Corrija apenas ortografia e gramática, sem mudar o sentido."},
                 {"role": "user", "content": texto}
             ]
         )
-        return resp.choices[0].message.content.strip()
+        return response.choices[0].message["content"].strip()
     except Exception as e:
-        logger.error(f"Erro ao corrigir texto: {e}")
+        logging.error(f"Erro ao corrigir texto: {e}")
         return texto
 
-# -------------------------------------------------
-# Webhook principal
-# -------------------------------------------------
+def gerar_protocolo():
+    return secrets.token_hex(4)  # Ex: a1b2c3d4
+
+def gerar_senha():
+    return secrets.token_urlsafe(6)  # Ex: F9dX2L
+
+# ========================
+# Fluxo principal
+# ========================
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    from_number = request.form.get("From")
-    message = request.form.get("Body", "").strip()
-    num_media = int(request.form.get("NumMedia", 0))
+    sender = request.form.get("From")
+    body = request.form.get("Body", "").strip()
+    midia_url = request.form.get("MediaUrl0")
 
-    if from_number not in conversation_state:
-        conversation_state[from_number] = {"step": "inicio", "dados": {}}
+    if sender not in conversas:
+        conversas[sender] = {"etapa": "menu", "dados": {}, "midias": []}
 
-    step = conversation_state[from_number]["step"]
-    dados = conversation_state[from_number]["dados"]
+    conversa = conversas[sender]
 
-    # -------------------------------------------------
-    # Fluxo da conversa
-    # -------------------------------------------------
-    if step == "inicio":
-        send_message(from_number,
+    # Se receber mídia
+    if midia_url:
+        conversa["midias"].append(midia_url)
+        enviar_mensagem(sender, "✅ Evidência recebida.")
+        return "OK", 200
+
+    # Fluxo de etapas
+    if conversa["etapa"] == "menu":
+        msg = (
             "👋 Olá! Bem-vindo ao Canal de Denúncias de Compliance.\n\n"
             "Escolha uma opção:\n"
             "1️⃣ Fazer denúncia *anônima*\n"
@@ -100,163 +91,163 @@ def webhook():
             "3️⃣ Consultar protocolo existente\n"
             "4️⃣ Encerrar atendimento"
         )
-        conversation_state[from_number]["step"] = "escolha"
+        enviar_mensagem(sender, msg)
+        conversa["etapa"] = "escolha"
+        return "OK", 200
 
-    elif step == "escolha":
-        if message == "1":
-            dados["tipo"] = "Anônima"
-            dados["nome"] = None
-            dados["email"] = None
-            dados["telefone"] = None
-            send_message(from_number, "✍️ Por favor, descreva sua denúncia:")
-            conversation_state[from_number]["step"] = "descricao"
-        elif message == "2":
-            dados["tipo"] = "Identificada"
-            send_message(from_number, "👤 Informe seu nome completo:")
-            conversation_state[from_number]["step"] = "nome"
-        elif message == "3":
-            send_message(from_number, "🔎 Consulta de protocolo ainda não implementada.")
-        elif message == "4":
-            send_message(from_number, "✅ Atendimento encerrado.")
-            conversation_state.pop(from_number, None)
+    # ======================
+    # CONSULTA DE PROTOCOLO
+    # ======================
+    if conversa["etapa"] == "escolha" and body == "3":
+        enviar_mensagem(sender, "🔎 Digite seu protocolo:")
+        conversa["etapa"] = "consulta_protocolo"
+        return "OK", 200
+
+    if conversa["etapa"] == "consulta_protocolo":
+        conversa["dados"]["protocolo"] = body
+        enviar_mensagem(sender, "🔑 Agora digite sua senha:")
+        conversa["etapa"] = "consulta_senha"
+        return "OK", 200
+
+    if conversa["etapa"] == "consulta_senha":
+        protocolo = conversa["dados"]["protocolo"]
+        senha = body
+        try:
+            result = supabase.table("denuncias").select("*").eq("protocolo", protocolo).execute()
+            if result.data:
+                denuncia = result.data[0]
+                senha_hash = denuncia.get("senha")
+                if senha_hash and bcrypt.checkpw(senha.encode(), senha_hash.encode()):
+                    resumo = (
+                        f"📌 Protocolo: {protocolo}\n"
+                        f"📊 Status: {denuncia.get('status','Não informado')}\n"
+                        f"📝 Denúncia: {denuncia.get('denuncia','')[:100]}..."
+                    )
+                    enviar_mensagem(sender, resumo)
+                else:
+                    enviar_mensagem(sender, "❌ Protocolo ou senha inválidos.")
+            else:
+                enviar_mensagem(sender, "❌ Protocolo não encontrado.")
+        except Exception as e:
+            logging.error(f"Erro consulta protocolo: {e}")
+            enviar_mensagem(sender, "⚠️ Erro ao consultar protocolo.")
+        conversa["etapa"] = "menu"
+        return "OK", 200
+
+    # ======================
+    # OPÇÃO ANÔNIMA/IDENTIFICADA
+    # ======================
+    if conversa["etapa"] == "escolha" and body in ["1", "2"]:
+        conversa["dados"]["anonimo"] = (body == "1")
+        enviar_mensagem(sender, "✍️ Por favor, descreva sua denúncia:")
+        conversa["etapa"] = "denuncia"
+        return "OK", 200
+
+    if conversa["etapa"] == "denuncia":
+        conversa["dados"]["denuncia"] = corrigir_texto(body)
+        enviar_mensagem(sender, "🗓️ Quando o fato ocorreu?")
+        conversa["etapa"] = "data_fato"
+        return "OK", 200
+
+    if conversa["etapa"] == "data_fato":
+        conversa["dados"]["data_fato"] = corrigir_texto(body)
+        enviar_mensagem(sender, "📍 Onde aconteceu o fato?")
+        conversa["etapa"] = "local"
+        return "OK", 200
+
+    if conversa["etapa"] == "local":
+        conversa["dados"]["local"] = corrigir_texto(body)
+        enviar_mensagem(sender, "👥 Quem estava envolvido?")
+        conversa["etapa"] = "envolvidos"
+        return "OK", 200
+
+    if conversa["etapa"] == "envolvidos":
+        conversa["dados"]["envolvidos"] = corrigir_texto(body)
+        enviar_mensagem(sender, "👀 Havia testemunhas?")
+        conversa["etapa"] = "testemunhas"
+        return "OK", 200
+
+    if conversa["etapa"] == "testemunhas":
+        conversa["dados"]["testemunhas"] = corrigir_texto(body)
+        enviar_mensagem(sender, "📎 Você possui evidências? (Digite 'sim' ou 'não')")
+        conversa["etapa"] = "evidencias"
+        return "OK", 200
+
+    if conversa["etapa"] == "evidencias":
+        if body.lower() in ["sim", "s"]:
+            enviar_mensagem(sender, "Deseja anexar agora?\nDigite 1️⃣ para enviar\nDigite 2️⃣ para prosseguir sem anexar")
+            conversa["etapa"] = "anexar_evidencias"
         else:
-            send_message(from_number, "⚠️ Opção inválida. Digite 1, 2, 3 ou 4.")
+            enviar_mensagem(sender, "🔄 Esse fato ocorreu apenas uma vez ou é recorrente?")
+            conversa["etapa"] = "frequencia"
+        return "OK", 200
 
-    elif step == "nome":
-        dados["nome"] = encrypt(corrigir_texto(message))
-        send_message(from_number, "📧 Informe seu e-mail:")
-        conversation_state[from_number]["step"] = "email"
-
-    elif step == "email":
-        dados["email"] = encrypt(corrigir_texto(message))
-        send_message(from_number, "📱 Informe seu telefone:")
-        conversation_state[from_number]["step"] = "telefone"
-
-    elif step == "telefone":
-        dados["telefone"] = encrypt(corrigir_texto(message))
-        send_message(from_number, "✍️ Agora descreva sua denúncia:")
-        conversation_state[from_number]["step"] = "descricao"
-
-    elif step == "descricao":
-        dados["descricao"] = corrigir_texto(message)
-        send_message(from_number, "🗓️ Quando o fato ocorreu (data e horário aproximados)?")
-        conversation_state[from_number]["step"] = "data"
-
-    elif step == "data":
-        dados["data"] = corrigir_texto(message)
-        send_message(from_number, "📍 Onde aconteceu o fato (setor, filial, área, etc.)?")
-        conversation_state[from_number]["step"] = "local"
-
-    elif step == "local":
-        dados["local"] = corrigir_texto(message)
-        send_message(from_number, "👥 Quem estava envolvido? (cargos ou funções)")
-        conversation_state[from_number]["step"] = "envolvidos"
-
-    elif step == "envolvidos":
-        dados["envolvidos"] = corrigir_texto(message)
-        send_message(from_number, "👀 Havia testemunhas?")
-        conversation_state[from_number]["step"] = "testemunhas"
-
-    elif step == "testemunhas":
-        dados["testemunhas"] = corrigir_texto(message)
-        send_message(from_number, "📎 Você possui documentos, fotos, vídeos ou outras evidências que possam ajudar?")
-        conversation_state[from_number]["step"] = "evidencias"
-
-    elif step == "evidencias":
-        if "sim" in message.lower():
-            conversation_state[from_number]["step"] = "evidencias_confirmar"
-            send_message(from_number,
-                "Deseja anexar agora?\n"
-                "Digite 1️⃣ para enviar as evidências\n"
-                "Digite 2️⃣ para prosseguir sem anexar"
-            )
+    if conversa["etapa"] == "anexar_evidencias":
+        if body == "1":
+            enviar_mensagem(sender, "📤 Envie os arquivos (fotos, vídeos ou documentos).")
+            conversa["etapa"] = "receber_midias"
         else:
-            dados["evidencias"] = "Não"
-            conversation_state[from_number]["step"] = "frequencia"
-            send_message(from_number, "🔄 Esse fato ocorreu apenas uma vez ou é recorrente?")
+            enviar_mensagem(sender, "🔄 Esse fato ocorreu apenas uma vez ou é recorrente?")
+            conversa["etapa"] = "frequencia"
+        return "OK", 200
 
-    elif step == "evidencias_confirmar":
-        if message == "1":
-            conversation_state[from_number]["step"] = "aguardando_upload"
-            send_message(from_number, "📤 Envie os arquivos (fotos, vídeos ou documentos).")
-        else:
-            dados["evidencias"] = "Não anexadas"
-            conversation_state[from_number]["step"] = "frequencia"
-            send_message(from_number, "🔄 Esse fato ocorreu apenas uma vez ou é recorrente?")
+    if conversa["etapa"] == "receber_midias":
+        enviar_mensagem(sender, "✅ Evidências anexadas.\n🔄 Esse fato ocorreu apenas uma vez ou é recorrente?")
+        conversa["etapa"] = "frequencia"
+        return "OK", 200
 
-    elif step == "aguardando_upload":
-        if num_media > 0:
-            media_urls = [request.form.get(f"MediaUrl{i}") for i in range(num_media)]
-            dados["midias"] = media_urls
-            dados["evidencias"] = "Anexadas"
-            conversation_state[from_number]["step"] = "frequencia"
-            send_message(from_number, "✅ Evidências anexadas.\n\n🔄 Esse fato ocorreu apenas uma vez ou é recorrente?")
-        else:
-            send_message(from_number, "⚠️ Nenhum arquivo recebido. Envie novamente ou digite 'pular' para continuar.")
+    if conversa["etapa"] == "frequencia":
+        conversa["dados"]["frequencia"] = corrigir_texto(body)
+        enviar_mensagem(sender, "⚖️ Qual o impacto ou gravidade do ocorrido?")
+        conversa["etapa"] = "impacto"
+        return "OK", 200
 
-    elif step == "frequencia":
-        dados["frequencia"] = corrigir_texto(message)
-        send_message(from_number, "⚖️ Qual o impacto ou gravidade do ocorrido?")
-        conversation_state[from_number]["step"] = "impacto"
+    if conversa["etapa"] == "impacto":
+        conversa["dados"]["impacto"] = corrigir_texto(body)
 
-    elif step == "impacto":
-        dados["impacto"] = corrigir_texto(message)
+        protocolo = gerar_protocolo()
+        senha = gerar_senha()
+        senha_hash = bcrypt.hashpw(senha.encode(), bcrypt.gensalt()).decode()
+
+        conversa["dados"]["protocolo"] = protocolo
+        conversa["dados"]["senha"] = senha_hash
+        conversa["dados"]["status"] = "Recebida"
+        conversa["dados"]["midias"] = conversa["midias"]
+
+        # Salvar no Supabase
+        try:
+            supabase.table("denuncias").insert(conversa["dados"]).execute()
+        except Exception as e:
+            logging.error(f"Erro ao salvar no Supabase: {e}")
+
         resumo = (
-            f"📋 Resumo da denúncia:\n\n"
-            f"👤 Tipo: {dados.get('tipo')}\n"
-            f"📝 Descrição: {dados.get('descricao')}\n"
-            f"🗓️ Data: {dados.get('data')}\n"
-            f"📍 Local: {dados.get('local')}\n"
-            f"👥 Envolvidos: {dados.get('envolvidos')}\n"
-            f"👀 Testemunhas: {dados.get('testemunhas')}\n"
-            f"📎 Evidências: {dados.get('evidencias')}\n"
-            f"🔄 Frequência: {dados.get('frequencia')}\n"
-            f"⚖️ Impacto: {dados.get('impacto')}\n\n"
-            "✅ Se estas informações estão corretas:\n"
-            "Digite 1️⃣ para confirmar e registrar sua denúncia\n"
-            "Digite 2️⃣ para corrigir alguma informação\n"
-            "Digite 3️⃣ para cancelar."
+            "📋 Resumo da denúncia:\n\n"
+            f"👤 Tipo: {'Anônima' if conversa['dados']['anonimo'] else 'Identificada'}\n"
+            f"📝 Descrição: {conversa['dados']['denuncia']}\n"
+            f"🗓️ Data: {conversa['dados']['data_fato']}\n"
+            f"📍 Local: {conversa['dados']['local']}\n"
+            f"👥 Envolvidos: {conversa['dados']['envolvidos']}\n"
+            f"👀 Testemunhas: {conversa['dados']['testemunhas']}\n"
+            f"📎 Evidências: {'Anexadas' if conversa['midias'] else 'Não'}\n"
+            f"🔄 Frequência: {conversa['dados']['frequencia']}\n"
+            f"⚖️ Impacto: {conversa['dados']['impacto']}\n\n"
+            f"✅ Sua denúncia foi registrada.\n"
+            f"📌 Protocolo: {protocolo}\n"
+            f"🔑 Senha: {senha}"
         )
-        send_message(from_number, resumo)
-        conversation_state[from_number]["step"] = "confirmar"
+        enviar_mensagem(sender, resumo)
+        conversa["etapa"] = "menu"
+        return "OK", 200
 
-    elif step == "confirmar":
-        if message == "1":
-            protocolo = str(uuid4())[:8]
-
-            registro = {
-                "protocolo": protocolo,
-                "tipo": dados.get("tipo"),
-                "nome": dados.get("nome"),
-                "email": dados.get("email"),
-                "telefone": dados.get("telefone"),
-                "descricao": dados.get("descricao"),
-                "data": dados.get("data"),
-                "local": dados.get("local"),
-                "envolvidos": dados.get("envolvidos"),
-                "testemunhas": dados.get("testemunhas"),
-                "evidencias": dados.get("evidencias"),
-                "frequencia": dados.get("frequencia"),
-                "impacto": dados.get("impacto"),
-                "midias": dados.get("midias", [])
-            }
-
-            supabase.table("denuncias").insert(registro).execute()
-            send_message(from_number, f"✅ Sua denúncia foi registrada.\n📌 Protocolo: {protocolo}")
-            conversation_state.pop(from_number, None)
-
-        elif message == "2":
-            send_message(from_number, "⚙️ Função de correção ainda não implementada.")
-        elif message == "3":
-            send_message(from_number, "❌ Denúncia cancelada.")
-            conversation_state.pop(from_number, None)
-        else:
-            send_message(from_number, "⚠️ Digite 1, 2 ou 3.")
+    # ======================
+    # ENCERRAR
+    # ======================
+    if conversa["etapa"] == "escolha" and body == "4":
+        enviar_mensagem(sender, "👋 Atendimento encerrado. Obrigado.")
+        del conversas[sender]
+        return "OK", 200
 
     return "OK", 200
 
-# -------------------------------------------------
-# Início
-# -------------------------------------------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+    app.run(host="0.0.0.0", port=10000)
