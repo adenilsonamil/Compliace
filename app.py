@@ -5,6 +5,7 @@ from twilio.rest import Client
 from supabase import create_client
 from cryptography.fernet import Fernet
 import openai
+from uuid import uuid4
 
 # -------------------------------------------------
 # Configuração de logging seguro
@@ -48,10 +49,7 @@ conversation_state = {}
 # Funções auxiliares
 # -------------------------------------------------
 def encrypt(value: str) -> str:
-    return fernet.encrypt(value.encode()).decode()
-
-def decrypt(value: str) -> str:
-    return fernet.decrypt(value.encode()).decode()
+    return fernet.encrypt(value.encode()).decode() if value else None
 
 def send_message(to, body):
     logger.debug(f"Enviando para {to}: {body}")
@@ -91,7 +89,7 @@ def webhook():
     dados = conversation_state[from_number]["dados"]
 
     # -------------------------------------------------
-    # Fluxo
+    # Fluxo da conversa
     # -------------------------------------------------
     if step == "inicio":
         send_message(from_number,
@@ -107,9 +105,9 @@ def webhook():
     elif step == "escolha":
         if message == "1":
             dados["tipo"] = "Anônima"
-            dados["nome"] = "—"
-            dados["email"] = "—"
-            dados["telefone"] = "—"
+            dados["nome"] = None
+            dados["email"] = None
+            dados["telefone"] = None
             send_message(from_number, "✍️ Por favor, descreva sua denúncia:")
             conversation_state[from_number]["step"] = "descricao"
         elif message == "2":
@@ -156,7 +154,7 @@ def webhook():
 
     elif step == "envolvidos":
         dados["envolvidos"] = corrigir_texto(message)
-        send_message(from_number, "👀 Havia outras pessoas que presenciaram o fato?")
+        send_message(from_number, "👀 Havia testemunhas?")
         conversation_state[from_number]["step"] = "testemunhas"
 
     elif step == "testemunhas":
@@ -180,7 +178,7 @@ def webhook():
     elif step == "evidencias_confirmar":
         if message == "1":
             conversation_state[from_number]["step"] = "aguardando_upload"
-            send_message(from_number, "📤 Por favor, envie os arquivos (fotos, vídeos ou documentos).")
+            send_message(from_number, "📤 Envie os arquivos (fotos, vídeos ou documentos).")
         else:
             dados["evidencias"] = "Não anexadas"
             conversation_state[from_number]["step"] = "frequencia"
@@ -192,30 +190,26 @@ def webhook():
             dados["midias"] = media_urls
             dados["evidencias"] = "Anexadas"
             conversation_state[from_number]["step"] = "frequencia"
-            send_message(from_number, "✅ Evidências anexadas com sucesso.\n\n🔄 Esse fato ocorreu apenas uma vez ou é recorrente?")
+            send_message(from_number, "✅ Evidências anexadas.\n\n🔄 Esse fato ocorreu apenas uma vez ou é recorrente?")
         else:
             send_message(from_number, "⚠️ Nenhum arquivo recebido. Envie novamente ou digite 'pular' para continuar.")
 
     elif step == "frequencia":
         dados["frequencia"] = corrigir_texto(message)
-        send_message(from_number, "⚖️ Na sua visão, qual o impacto ou gravidade desse ocorrido?")
+        send_message(from_number, "⚖️ Qual o impacto ou gravidade do ocorrido?")
         conversation_state[from_number]["step"] = "impacto"
 
     elif step == "impacto":
         dados["impacto"] = corrigir_texto(message)
-
         resumo = (
-            f"📋 Resumo da sua denúncia:\n\n"
+            f"📋 Resumo da denúncia:\n\n"
             f"👤 Tipo: {dados.get('tipo')}\n"
-            f"Nome: {dados.get('nome', '—')}\n"
-            f"E-mail: {dados.get('email', '—')}\n"
-            f"Telefone: {dados.get('telefone', '—')}\n\n"
             f"📝 Descrição: {dados.get('descricao')}\n"
-            f"🗓️ Data do fato: {dados.get('data')}\n"
+            f"🗓️ Data: {dados.get('data')}\n"
             f"📍 Local: {dados.get('local')}\n"
             f"👥 Envolvidos: {dados.get('envolvidos')}\n"
             f"👀 Testemunhas: {dados.get('testemunhas')}\n"
-            f"📎 Evidências: {dados.get('evidencias', '—')}\n"
+            f"📎 Evidências: {dados.get('evidencias')}\n"
             f"🔄 Frequência: {dados.get('frequencia')}\n"
             f"⚖️ Impacto: {dados.get('impacto')}\n\n"
             "✅ Se estas informações estão corretas:\n"
@@ -228,9 +222,29 @@ def webhook():
 
     elif step == "confirmar":
         if message == "1":
-            supabase.table("denuncias").insert(dados).execute()
-            send_message(from_number, "✅ Sua denúncia foi registrada com sucesso. Obrigado!")
+            protocolo = str(uuid4())[:8]
+
+            registro = {
+                "protocolo": protocolo,
+                "tipo": dados.get("tipo"),
+                "nome": dados.get("nome"),
+                "email": dados.get("email"),
+                "telefone": dados.get("telefone"),
+                "descricao": dados.get("descricao"),
+                "data": dados.get("data"),
+                "local": dados.get("local"),
+                "envolvidos": dados.get("envolvidos"),
+                "testemunhas": dados.get("testemunhas"),
+                "evidencias": dados.get("evidencias"),
+                "frequencia": dados.get("frequencia"),
+                "impacto": dados.get("impacto"),
+                "midias": dados.get("midias", [])
+            }
+
+            supabase.table("denuncias").insert(registro).execute()
+            send_message(from_number, f"✅ Sua denúncia foi registrada.\n📌 Protocolo: {protocolo}")
             conversation_state.pop(from_number, None)
+
         elif message == "2":
             send_message(from_number, "⚙️ Função de correção ainda não implementada.")
         elif message == "3":
