@@ -17,7 +17,7 @@ logging.basicConfig(level=logging.DEBUG)
 # Twilio
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
-TWILIO_WHATSAPP = os.getenv("TWILIO_WHATSAPP")
+TWILIO_WHATSAPP = os.getenv("TWILIO_WHATSAPP")  # Ex: +14155238886
 client_twilio = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
 # Supabase
@@ -31,16 +31,21 @@ openai.api_key = os.getenv("OPENAI_API_KEY")
 # Estados da conversa
 user_states = {}
 
+# ------------------------------
 # Funções auxiliares
+# ------------------------------
 def enviar_whatsapp(destino, mensagem):
-    logging.debug(f"Enviando para whatsapp:{destino}: {mensagem}")
+    """Envia mensagem via WhatsApp API do Twilio"""
+    numero_formatado = destino if destino.startswith("whatsapp:") else f"whatsapp:{destino}"
+    logging.debug(f"Enviando para {numero_formatado}: {mensagem}")
     client_twilio.messages.create(
         from_=f"whatsapp:{TWILIO_WHATSAPP}",
         body=mensagem,
-        to=destino,
+        to=numero_formatado,   # ✅ garante que sempre tenha prefixo whatsapp:
     )
 
 def corrigir_texto(texto):
+    """Usa OpenAI para corrigir ortografia e gramática"""
     try:
         resposta = openai.chat.completions.create(
             model="gpt-4o-mini",
@@ -60,7 +65,9 @@ def gerar_protocolo():
 def gerar_senha():
     return ''.join(random.choices(string.ascii_letters + string.digits, k=10))
 
+# ------------------------------
 # Fluxo inicial
+# ------------------------------
 def iniciar_atendimento(user_number):
     user_states[user_number] = {"step": "inicio", "dados": {}}
     msg = (
@@ -73,10 +80,12 @@ def iniciar_atendimento(user_number):
     )
     enviar_whatsapp(user_number, msg)
 
-# Webhook
+# ------------------------------
+# Webhook principal
+# ------------------------------
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    user_number = request.form.get("From").replace("whatsapp:", "")
+    user_number = request.form.get("From").replace("whatsapp:", "")  # 🔹 mantemos só número aqui
     incoming_msg = request.form.get("Body").strip()
     estado = user_states.get(user_number, {"step": "inicio", "dados": {}})
 
@@ -212,6 +221,9 @@ def webhook():
 
     return "OK", 200
 
+# ------------------------------
+# Rota de teste
+# ------------------------------
 @app.route("/", methods=["GET"])
 def home():
     return "Canal de Denúncias de Compliance ativo."
