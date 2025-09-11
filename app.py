@@ -1,232 +1,243 @@
 import os
-import logging
 import random
 import string
+import logging
 from datetime import datetime
-
-from flask import Flask, request
+from flask import Flask, request, Response
 from twilio.rest import Client
 from supabase import create_client, Client as SupabaseClient
-from werkzeug.security import generate_password_hash, check_password_hash
-import openai
 
-# Configurações principais
-app = Flask(__name__)
+# Configuração de logging
 logging.basicConfig(level=logging.DEBUG)
 
-# Twilio
-TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
-TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
-TWILIO_WHATSAPP = os.getenv("TWILIO_WHATSAPP")  # Ex: +14155238886
-client_twilio = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+# Inicialização do Flask
+app = Flask(__name__)
 
-# Supabase
+# ========================
+# Variáveis de ambiente
+# ========================
+TWILIO_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH = os.getenv("TWILIO_AUTH_TOKEN")
+TWILIO_WHATSAPP = os.getenv("TWILIO_PHONE_NUMBER")  # deve ser no formato: whatsapp:+14155238886
+
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+
+# Verificação das variáveis
+obrigatorias = {
+    "TWILIO_ACCOUNT_SID": TWILIO_SID,
+    "TWILIO_AUTH_TOKEN": TWILIO_AUTH,
+    "TWILIO_PHONE_NUMBER": TWILIO_WHATSAPP,
+    "SUPABASE_URL": SUPABASE_URL,
+    "SUPABASE_SERVICE_ROLE_KEY": SUPABASE_KEY
+}
+for var, valor in obrigatorias.items():
+    if not valor:
+        raise ValueError(f"❌ Variável de ambiente obrigatória não definida: {var}")
+
+# ========================
+# Clientes externos
+# ========================
+client_twilio = Client(TWILIO_SID, TWILIO_AUTH)
 supabase: SupabaseClient = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# OpenAI
-openai.api_key = os.getenv("OPENAI_API_KEY")
+# Estados dos usuários
+estados = {}
 
-# Estados da conversa
-user_states = {}
-
-# ------------------------------
+# ========================
 # Funções auxiliares
-# ------------------------------
-def enviar_whatsapp(destino, mensagem):
-    """Envia mensagem via WhatsApp API do Twilio"""
-    numero_formatado = destino if destino.startswith("whatsapp:") else f"whatsapp:{destino}"
-    logging.debug(f"Enviando para {numero_formatado}: {mensagem}")
-    client_twilio.messages.create(
-        from_=f"whatsapp:{TWILIO_WHATSAPP}",
-        body=mensagem,
-        to=numero_formatado,   # ✅ garante que sempre tenha prefixo whatsapp:
-    )
-
-def corrigir_texto(texto):
-    """Usa OpenAI para corrigir ortografia e gramática"""
+# ========================
+def enviar_whatsapp(destino: str, mensagem: str):
+    """Envia mensagens pelo WhatsApp via Twilio"""
     try:
-        resposta = openai.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "Você é um assistente de revisão de texto. Corrija apenas ortografia e gramática, sem mudar o sentido."},
-                {"role": "user", "content": texto},
-            ],
+        numero_formatado = destino
+        if not numero_formatado.startswith("whatsapp:"):
+            numero_formatado = f"whatsapp:{numero_formatado}"
+        logging.debug(f"Enviando para {numero_formatado}: {mensagem}")
+        client_twilio.messages.create(
+            from_=TWILIO_WHATSAPP,
+            body=mensagem,
+            to=numero_formatado
         )
-        return resposta.choices[0].message.content.strip()
     except Exception as e:
-        logging.error(f"Erro ao corrigir texto: {e}")
-        return texto
+        logging.error(f"Erro ao enviar mensagem WhatsApp: {e}")
 
 def gerar_protocolo():
-    return ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
+    """Gera um protocolo único"""
+    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
 
 def gerar_senha():
-    return ''.join(random.choices(string.ascii_letters + string.digits, k=10))
+    """Gera uma senha simples"""
+    return ''.join(random.choices(string.ascii_letters + string.digits, k=6))
 
-# ------------------------------
-# Fluxo inicial
-# ------------------------------
-def iniciar_atendimento(user_number):
-    user_states[user_number] = {"step": "inicio", "dados": {}}
-    msg = (
-        "👋 Olá! Bem-vindo ao Canal de Denúncias de Compliance.\n\n"
-        "Escolha uma opção:\n"
-        "1️⃣ Fazer denúncia *anônima*\n"
-        "2️⃣ Fazer denúncia *identificada*\n"
-        "3️⃣ Consultar protocolo existente\n"
-        "4️⃣ Encerrar atendimento"
-    )
-    enviar_whatsapp(user_number, msg)
-
-# ------------------------------
-# Webhook principal
-# ------------------------------
+# ========================
+# Rota principal (webhook)
+# ========================
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    user_number = request.form.get("From").replace("whatsapp:", "")  # 🔹 mantemos só número aqui
-    incoming_msg = request.form.get("Body").strip()
-    estado = user_states.get(user_number, {"step": "inicio", "dados": {}})
+    dados = request.form
+    user_number = dados.get("From", "").replace("whatsapp:", "")
+    user_message = dados.get("Body", "").strip()
 
-    # Encerrar
-    if incoming_msg == "4":
-        enviar_whatsapp(user_number, "✅ Atendimento encerrado. Obrigado por utilizar nosso canal.")
-        user_states.pop(user_number, None)
-        return "OK", 200
+    if not user_number:
+        return Response(status=400)
 
-    # Início
-    if estado["step"] == "inicio":
-        if incoming_msg == "1":
-            estado["dados"]["anonimo"] = True
-            estado["step"] = "descricao"
-            enviar_whatsapp(user_number, "✍️ Por favor, descreva sua denúncia:")
-        elif incoming_msg == "2":
-            estado["dados"]["anonimo"] = False
-            estado["step"] = "nome"
-            enviar_whatsapp(user_number, "👤 Informe seu nome completo:")
-        elif incoming_msg == "3":
-            estado["step"] = "consulta_protocolo"
-            enviar_whatsapp(user_number, "🔎 Digite o protocolo da sua denúncia:")
+    estado = estados.get(user_number, {"etapa": "inicio", "dados": {}})
+
+    etapa = estado["etapa"]
+    dados = estado["dados"]
+
+    # Fluxo inicial
+    if etapa == "inicio":
+        enviar_whatsapp(user_number, "👋 Olá! Você deseja registrar uma denúncia de forma:\n1️⃣ Anônima\n2️⃣ Identificada")
+        estado["etapa"] = "tipo"
+        estados[user_number] = estado
+        return Response(status=200)
+
+    # Escolha do tipo
+    if etapa == "tipo":
+        if user_message == "1":
+            dados["anonimo"] = True
+            dados["tipo"] = "Anônima"
+            enviar_whatsapp(user_number, "✍️ Por favor, descreva sua denúncia.")
+            estado["etapa"] = "descricao"
+        elif user_message == "2":
+            dados["anonimo"] = False
+            dados["tipo"] = "Identificada"
+            enviar_whatsapp(user_number, "👤 Informe seu nome:")
+            estado["etapa"] = "nome"
         else:
-            enviar_whatsapp(user_number, "⚠️ Opção inválida. Digite 1, 2, 3 ou 4.")
-        user_states[user_number] = estado
-        return "OK", 200
-
-    # ==============================
-    # Consulta de protocolo + senha
-    # ==============================
-    if estado["step"] == "consulta_protocolo":
-        estado["dados"]["protocolo"] = incoming_msg
-        estado["step"] = "consulta_senha"
-        enviar_whatsapp(user_number, "🔑 Digite a senha associada ao protocolo:")
-        user_states[user_number] = estado
-        return "OK", 200
-
-    if estado["step"] == "consulta_senha":
-        protocolo = estado["dados"]["protocolo"]
-        senha_digitada = incoming_msg
-        try:
-            result = supabase.table("denuncias").select("*").eq("protocolo", protocolo).execute()
-            if result.data:
-                denuncia = result.data[0]
-                senha_hash = denuncia.get("senha")
-                if senha_hash and check_password_hash(senha_hash, senha_digitada):
-                    resposta = (
-                        f"📋 Consulta da denúncia:\n"
-                        f"📌 Protocolo: {protocolo}\n"
-                        f"📊 Status: {denuncia.get('status','Em análise')}\n"
-                        f"📝 Descrição: {denuncia.get('descricao','')[:120]}..."
-                    )
-                else:
-                    resposta = "❌ Protocolo ou senha inválidos."
-            else:
-                resposta = "❌ Nenhuma denúncia encontrada com esse protocolo."
-        except Exception as e:
-            resposta = f"⚠️ Erro ao consultar denúncia: {e}"
-
-        enviar_whatsapp(user_number, resposta)
-        user_states.pop(user_number, None)
-        return "OK", 200
+            enviar_whatsapp(user_number, "⚠️ Escolha inválida. Digite 1 para Anônima ou 2 para Identificada.")
+        estados[user_number] = estado
+        return Response(status=200)
 
     # Nome
-    if estado["step"] == "nome":
-        estado["dados"]["nome"] = corrigir_texto(incoming_msg)
-        estado["step"] = "email"
+    if etapa == "nome":
+        dados["nome"] = user_message
         enviar_whatsapp(user_number, "📧 Informe seu e-mail:")
-        user_states[user_number] = estado
-        return "OK", 200
+        estado["etapa"] = "email"
+        estados[user_number] = estado
+        return Response(status=200)
 
-    # Email
-    if estado["step"] == "email":
-        estado["dados"]["email"] = incoming_msg
-        estado["step"] = "telefone"
-        enviar_whatsapp(user_number, "📞 Informe seu telefone:")
-        user_states[user_number] = estado
-        return "OK", 200
+    # E-mail
+    if etapa == "email":
+        dados["email"] = user_message
+        enviar_whatsapp(user_number, "📱 Informe seu telefone:")
+        estado["etapa"] = "telefone"
+        estados[user_number] = estado
+        return Response(status=200)
 
     # Telefone
-    if estado["step"] == "telefone":
-        estado["dados"]["telefone"] = incoming_msg
-        estado["step"] = "descricao"
-        enviar_whatsapp(user_number, "✍️ Por favor, descreva sua denúncia:")
-        user_states[user_number] = estado
-        return "OK", 200
+    if etapa == "telefone":
+        dados["telefone"] = user_message
+        enviar_whatsapp(user_number, "✍️ Agora descreva sua denúncia:")
+        estado["etapa"] = "descricao"
+        estados[user_number] = estado
+        return Response(status=200)
 
     # Descrição
-    if estado["step"] == "descricao":
-        estado["dados"]["descricao"] = corrigir_texto(incoming_msg)
-        estado["step"] = "confirmar"
-        protocolo = gerar_protocolo()
-        senha = gerar_senha()
-        senha_hash = generate_password_hash(senha)
+    if etapa == "descricao":
+        dados["descricao"] = user_message
+        enviar_whatsapp(user_number, "📅 Quando ocorreu o fato?")
+        estado["etapa"] = "data_fato"
+        estados[user_number] = estado
+        return Response(status=200)
 
-        estado["dados"]["protocolo"] = protocolo
-        estado["dados"]["senha"] = senha_hash
-        estado["dados"]["status"] = "Recebida"
+    if etapa == "data_fato":
+        dados["data_fato"] = user_message
+        enviar_whatsapp(user_number, "📍 Onde ocorreu o fato?")
+        estado["etapa"] = "local"
+        estados[user_number] = estado
+        return Response(status=200)
 
-        resumo = (
-            f"📋 Resumo da denúncia:\n\n"
-            f"👤 Tipo: {'Anônima' if estado['dados'].get('anonimo') else 'Identificada'}\n"
-            f"📝 Descrição: {estado['dados'].get('descricao')}\n"
-            f"\n✅ Se estas informações estão corretas:\n"
-            f"Digite 1️⃣ para confirmar e registrar sua denúncia\n"
-            f"Digite 2️⃣ para corrigir alguma informação\n"
-            f"Digite 3️⃣ para cancelar."
-        )
-        enviar_whatsapp(user_number, resumo)
-        estado["senha_plana"] = senha
-        user_states[user_number] = estado
-        return "OK", 200
+    if etapa == "local":
+        dados["local"] = user_message
+        enviar_whatsapp(user_number, "👥 Quem esteve envolvido?")
+        estado["etapa"] = "envolvidos"
+        estados[user_number] = estado
+        return Response(status=200)
 
-    # Confirmação
-    if estado["step"] == "confirmar":
-        if incoming_msg == "1":
-            dados = estado["dados"]
-            try:
-                supabase.table("denuncias").insert(dados).execute()
-                enviar_whatsapp(
-                    user_number,
-                    f"✅ Sua denúncia foi registrada.\n📌 Protocolo: {dados['protocolo']}\n🔑 Senha: {estado['senha_plana']}"
-                )
-            except Exception as e:
-                enviar_whatsapp(user_number, f"⚠️ Erro ao registrar denúncia: {e}")
-        elif incoming_msg == "2":
-            enviar_whatsapp(user_number, "🔄 Recomeçando o cadastro da denúncia.")
-            iniciar_atendimento(user_number)
+    if etapa == "envolvidos":
+        dados["envolvidos"] = user_message
+        enviar_whatsapp(user_number, "👀 Houve testemunhas? Se sim, informe.")
+        estado["etapa"] = "testemunhas"
+        estados[user_number] = estado
+        return Response(status=200)
+
+    if etapa == "testemunhas":
+        dados["testemunhas"] = user_message
+        enviar_whatsapp(user_number, "📎 Você possui documentos, fotos, vídeos ou outras evidências que possam ajudar? (Sim/Não)")
+        estado["etapa"] = "evidencias"
+        estados[user_number] = estado
+        return Response(status=200)
+
+    if etapa == "evidencias":
+        if user_message.lower() in ["sim", "s"]:
+            dados["evidencias"] = "Sim"
+            enviar_whatsapp(user_number, "📤 Deseja anexar as evidências agora?\n1️⃣ Sim\n2️⃣ Não")
+            estado["etapa"] = "anexo"
         else:
+            dados["evidencias"] = "Não"
+            estado["etapa"] = "resumo"
+        estados[user_number] = estado
+        return Response(status=200)
+
+    if etapa == "anexo":
+        if user_message == "1":
+            dados["midias"] = "Usuário optou por enviar anexos posteriormente"
+        else:
+            dados["midias"] = None
+        estado["etapa"] = "resumo"
+        estados[user_number] = estado
+        # não retorna aqui, deixa cair no resumo
+
+    if etapa == "resumo":
+        resumo = f"📋 Resumo da denúncia:\n\n"
+        resumo += f"👤 Tipo: {dados.get('tipo', 'N/A')}\n"
+        if not dados.get("anonimo"):
+            resumo += f"👤 Nome: {dados.get('nome', 'N/A')}\n"
+            resumo += f"📧 E-mail: {dados.get('email', 'N/A')}\n"
+            resumo += f"📱 Telefone: {dados.get('telefone', 'N/A')}\n"
+        resumo += f"📝 Descrição: {dados.get('descricao', 'N/A')}\n"
+        resumo += f"📅 Data do Fato: {dados.get('data_fato', 'N/A')}\n"
+        resumo += f"📍 Local: {dados.get('local', 'N/A')}\n"
+        resumo += f"👥 Envolvidos: {dados.get('envolvidos', 'N/A')}\n"
+        resumo += f"👀 Testemunhas: {dados.get('testemunhas', 'N/A')}\n"
+        resumo += f"📎 Evidências: {dados.get('evidencias', 'N/A')}\n"
+
+        enviar_whatsapp(user_number, resumo + "\n✅ Se estas informações estão corretas:\nDigite 1️⃣ para confirmar e registrar sua denúncia\nDigite 2️⃣ para corrigir alguma informação\nDigite 3️⃣ para cancelar.")
+        estado["etapa"] = "confirmacao"
+        estados[user_number] = estado
+        return Response(status=200)
+
+    if etapa == "confirmacao":
+        if user_message == "1":
+            protocolo = gerar_protocolo()
+            senha = gerar_senha()
+            dados["protocolo"] = protocolo
+            dados["senha"] = senha
+            dados["criado_em"] = datetime.utcnow().isoformat()
+
+            supabase.table("denuncias").insert(dados).execute()
+
+            enviar_whatsapp(user_number, f"✅ Denúncia registrada com sucesso!\n📑 Protocolo: {protocolo}\n🔑 Senha: {senha}")
+            estados.pop(user_number, None)  # limpa estado
+        elif user_message == "2":
+            enviar_whatsapp(user_number, "✍️ Vamos corrigir. Por favor, descreva novamente sua denúncia:")
+            estado["etapa"] = "descricao"
+            estados[user_number] = estado
+        elif user_message == "3":
             enviar_whatsapp(user_number, "❌ Denúncia cancelada.")
-        user_states.pop(user_number, None)
-        return "OK", 200
+            estados.pop(user_number, None)  # ✅ limpa estado no cancelamento
+        else:
+            enviar_whatsapp(user_number, "⚠️ Opção inválida. Digite 1, 2 ou 3.")
+        return Response(status=200)
 
-    return "OK", 200
+    # Se cair aqui, reinicia fluxo
+    estados.pop(user_number, None)
+    enviar_whatsapp(user_number, "⚠️ Não entendi. Vamos começar novamente.\nDigite qualquer coisa para iniciar.")
+    return Response(status=200)
 
-# ------------------------------
-# Rota de teste
-# ------------------------------
 @app.route("/", methods=["GET"])
-def home():
-    return "Canal de Denúncias de Compliance ativo."
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+def index():
+    return "✅ API de Compliance rodando!", 200
