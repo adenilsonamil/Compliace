@@ -1,187 +1,187 @@
 import os
 import logging
-import random
-import string
+import uuid
+import json
 from flask import Flask, request
 from twilio.rest import Client
-from twilio.twiml.messaging_response import MessagingResponse
-from supabase import create_client, Client as SupabaseClient
 from openai import OpenAI
+from supabase import create_client, Client as SupabaseClient
 
-# --------------------------------------------------------
+# ---------------------------
 # Configurações
-# --------------------------------------------------------
+# ---------------------------
 logging.basicConfig(level=logging.DEBUG)
 
 app = Flask(__name__)
 
 # Twilio
-TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
-TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
-TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
-
-twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-
-# Supabase
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-supabase: SupabaseClient = create_client(SUPABASE_URL, SUPABASE_KEY)
+twilio_sid = os.getenv("TWILIO_ACCOUNT_SID")
+twilio_auth = os.getenv("TWILIO_AUTH_TOKEN")
+twilio_phone = os.getenv("TWILIO_PHONE_NUMBER")  # já vem no formato "whatsapp:+1415..."
+twilio_client = Client(twilio_sid, twilio_auth)
 
 # OpenAI
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# Memória simples em memória RAM
+# Supabase
+supabase_url = os.getenv("SUPABASE_URL")
+supabase_key = os.getenv("SUPABASE_KEY")
+supabase: SupabaseClient = create_client(supabase_url, supabase_key)
+
+# Sessões de conversa em memória
 sessions = {}
 
-# --------------------------------------------------------
+# Prompt base para a IA
+SYSTEM_PROMPT = """
+Você é um atendente de ouvidoria de compliance, amigável e acolhedor.
+Sua função é coletar informações de uma denúncia. 
+Pergunte de forma natural e humanizada, como se fosse um diálogo.
+
+As informações que precisa coletar são:
+- descricao
+- categoria
+- local
+- data_fato
+- envolvidos
+- testemunhas
+- impacto
+- evidencias
+
+Regras:
+- Corrija erros de português nas respostas do usuário.
+- Pergunte apenas sobre o que ainda não foi respondido.
+- Responda SEMPRE em JSON no formato:
+{"mensagem": "texto amigável para o usuário", "campos": {...}}
+
+No campo "campos", devolva apenas o que conseguir extrair até agora.
+"""
+
+# ---------------------------
 # Funções auxiliares
-# --------------------------------------------------------
-def gerar_protocolo():
-    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+# ---------------------------
 
-def gerar_senha():
-    return ''.join(random.choices(string.ascii_letters + string.digits, k=6))
-
-def enviar_whatsapp(to, body):
-    """Envia mensagem WhatsApp via Twilio"""
+def send_message(to, body):
+    """Enviar mensagem pelo WhatsApp via Twilio"""
     try:
+        logging.debug(f"Enviando para {to}: {body}")
         twilio_client.messages.create(
-            from_=f"whatsapp:{TWILIO_PHONE_NUMBER}",
-            to=f"whatsapp:{to}",
+            from_=twilio_phone,
+            to=to,
             body=body
         )
-        logging.debug(f"Enviando para whatsapp:{to}: {body}")
     except Exception as e:
         logging.error(f"Erro ao enviar mensagem WhatsApp: {e}")
 
-def interpretar_resposta(user_id, texto):
-    """Envia texto do usuário para a IA e interpreta em JSON"""
+
+def ask_openai(session_id, user_input):
+    """Enviar mensagem para a IA e retornar resposta estruturada"""
+    messages = sessions[session_id]["messages"]
+    messages.append({"role": "user", "content": user_input})
+
     try:
         response = openai_client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Você é um assistente de compliance acolhedor. "
-                        "Corrija erros de português e extraia insights da denúncia. "
-                        "Responda em JSON estruturado com campos: descricao, categoria, local, "
-                        "data_fato, envolvidos, testemunhas, impacto, evidencias."
-                    )
-                },
-                {"role": "user", "content": texto}
-            ],
+            messages=messages,
             max_tokens=400,
             response_format={"type": "json_object"}
         )
-        return response.choices[0].message.content
+        content = response.choices[0].message.content
+        logging.debug(f"Resposta IA: {content}")
+        data = json.loads(content)
+        return data
     except Exception as e:
-        logging.error(f"Erro interpretar_resposta: {e}")
-        return None
+        logging.error(f"Erro IA: {e}")
+        return {"mensagem": "⚠️ Não consegui processar sua resposta. Pode repetir?", "campos": {}}
 
-def salvar_denuncia(dados, anonimo=True):
-    """Salva a denúncia no Supabase"""
-    protocolo = gerar_protocolo()
-    senha = gerar_senha()
 
+def salvar_denuncia(campos):
+    """Salvar denúncia no Supabase"""
     try:
-        supabase.table("denuncias").insert({
-            "anonimo": anonimo,
-            "descricao": dados.get("descricao"),
-            "categoria": dados.get("categoria"),
-            "local": dados.get("local"),
-            "data_fato": dados.get("data_fato"),
-            "envolvidos": ', '.join(dados.get("envolvidos", [])) if isinstance(dados.get("envolvidos"), list) else dados.get("envolvidos"),
-            "testemunhas": ', '.join(dados.get("testemunhas", [])) if isinstance(dados.get("testemunhas"), list) else dados.get("testemunhas"),
-            "impacto": dados.get("impacto"),
-            "evidencias": dados.get("evidencias", []),
+        protocolo = str(uuid.uuid4())[:8].upper()
+        senha = str(uuid.uuid4())[:6]
+
+        data = {
             "protocolo": protocolo,
             "senha": senha,
-            "resumo": (
-                f"Descrição: {dados.get('descricao')}\n"
-                f"Categoria: {dados.get('categoria')}\n"
-                f"Local: {dados.get('local')}\n"
-                f"Data: {dados.get('data_fato')}\n"
-                f"Envolvidos: {dados.get('envolvidos')}\n"
-                f"Testemunhas: {dados.get('testemunhas')}\n"
-                f"Impacto: {dados.get('impacto')}\n"
-            )
-        }).execute()
+            "descricao": campos.get("descricao"),
+            "categoria": campos.get("categoria"),
+            "local": campos.get("local"),
+            "data_fato": campos.get("data_fato"),
+            "envolvidos": campos.get("envolvidos"),
+            "testemunhas": campos.get("testemunhas"),
+            "impacto": campos.get("impacto"),
+            "evidencias": campos.get("evidencias"),
+        }
 
+        supabase.table("denuncias").insert(data).execute()
         return protocolo, senha
     except Exception as e:
         logging.error(f"Erro ao salvar denúncia: {e}")
         return None, None
 
-# --------------------------------------------------------
-# Webhook WhatsApp
-# --------------------------------------------------------
+
+# ---------------------------
+# Webhook do WhatsApp
+# ---------------------------
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    sender = request.form.get("From", "").replace("whatsapp:", "")
-    body = request.form.get("Body", "").strip()
-    resp = MessagingResponse()
+    from_number = request.form.get("From")
+    user_input = request.form.get("Body")
 
-    # Se é novo usuário
-    if sender not in sessions:
-        sessions[sender] = {"step": "inicio", "dados": {}}
-        msg = (
-            "👋 Olá! Bem-vindo ao *Canal de Denúncias de Compliance*.\n\n"
-            "Você pode escrever livremente sua denúncia. Eu vou organizar as informações para você."
-        )
-        enviar_whatsapp(sender, msg)
-        return str(resp)
+    if from_number not in sessions:
+        # Nova sessão
+        sessions[from_number] = {
+            "messages": [{"role": "system", "content": SYSTEM_PROMPT}],
+            "campos": {}
+        }
+        send_message(from_number, "👋 Olá! Bem-vindo ao *Canal de Denúncias de Compliance*.\n\nVocê pode escrever livremente sua denúncia. Eu vou organizar as informações para você.")
+        return "OK", 200
 
-    session = sessions[sender]
+    session = sessions[from_number]
 
-    # Interpretação pela IA
-    interpretado = interpretar_resposta(sender, body)
-    if interpretado:
-        import json
-        try:
-            dados = json.loads(interpretado)
-            session["dados"].update(dados)
+    # Processar resposta do usuário
+    ia_response = ask_openai(from_number, f"Resposta do usuário: {user_input}")
+    mensagem = ia_response.get("mensagem", "")
+    novos_campos = ia_response.get("campos", {})
 
-            # Se já temos info suficiente
-            if all(k in session["dados"] for k in ["descricao", "categoria", "local", "data_fato"]):
-                protocolo, senha = salvar_denuncia(session["dados"], anonimo=True)
-                if protocolo:
-                    resumo = (
-                        "✅ Sua denúncia foi registrada com sucesso.\n\n"
-                        f"📋 Resumo:\n"
-                        f"- Descrição: {session['dados'].get('descricao')}\n"
-                        f"- Categoria: {session['dados'].get('categoria')}\n"
-                        f"- Local: {session['dados'].get('local')}\n"
-                        f"- Data: {session['dados'].get('data_fato')}\n"
-                        f"- Envolvidos: {session['dados'].get('envolvidos')}\n"
-                        f"- Testemunhas: {session['dados'].get('testemunhas')}\n"
-                        f"- Impacto: {session['dados'].get('impacto')}\n\n"
-                        f"🔐 Protocolo: {protocolo}\n"
-                        f"🔑 Senha: {senha}\n\n"
-                        "📌 Consulte o andamento em: https://ouvidoria.portocentrooeste.com.br"
-                    )
-                    enviar_whatsapp(sender, resumo)
-                    sessions.pop(sender, None)  # finaliza sessão
-                else:
-                    enviar_whatsapp(sender, "⚠️ Ocorreu um erro ao salvar sua denúncia. Tente novamente.")
-            else:
-                # IA pede mais detalhes se algo estiver faltando
-                if not session["dados"].get("data_fato"):
-                    enviar_whatsapp(sender, "🗓️ Você poderia me dizer quando isso aconteceu?")
-                elif not session["dados"].get("local"):
-                    enviar_whatsapp(sender, "📍 Pode me informar onde ocorreu?")
-                else:
-                    enviar_whatsapp(sender, "✍️ Continue, pode me contar mais detalhes.")
-        except Exception as e:
-            logging.error(f"Erro processando JSON: {e}")
-            enviar_whatsapp(sender, "⚠️ Não consegui entender bem. Pode reformular sua mensagem?")
-    else:
-        enviar_whatsapp(sender, "⚠️ Não consegui processar sua resposta. Pode repetir?")
+    # Atualizar campos coletados
+    session["campos"].update({k: v for k, v in novos_campos.items() if v})
 
-    return str(resp)
+    # Verificar se todos os campos obrigatórios foram preenchidos
+    obrigatorios = ["descricao", "categoria", "local", "data_fato", "envolvidos"]
+    faltando = [c for c in obrigatorios if not session["campos"].get(c)]
 
-# --------------------------------------------------------
-# Start
-# --------------------------------------------------------
+    if not faltando:
+        # Finalizar denúncia
+        protocolo, senha = salvar_denuncia(session["campos"])
+        if protocolo:
+            resumo = "\n".join([f"{k.capitalize()}: {v}" for k, v in session["campos"].items() if v])
+            msg_final = f"""✅ Sua denúncia foi registrada!
+
+📌 Protocolo: {protocolo}
+🔑 Senha: {senha}
+
+Resumo:
+{resumo}
+
+Você pode consultar em: https://ouvidoria.portocentroooeste.com.br
+"""
+            send_message(from_number, msg_final)
+            del sessions[from_number]
+            return "OK", 200
+        else:
+            send_message(from_number, "⚠️ Ocorreu um erro ao salvar sua denúncia. Tente novamente.")
+            return "OK", 200
+
+    # Continuar conversa
+    send_message(from_number, mensagem)
+    return "OK", 200
+
+
+# ---------------------------
+# Início
+# ---------------------------
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+    app.run(host="0.0.0.0", port=10000)
