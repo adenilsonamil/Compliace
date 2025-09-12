@@ -31,13 +31,14 @@ supabase: SupabaseClient = create_client(supabase_url, supabase_key)
 # Sessões de conversa em memória
 sessions = {}
 
-# Prompt base para a IA
+# Prompt humanizado
 SYSTEM_PROMPT = """
-Você é um atendente de ouvidoria de compliance, amigável e acolhedor.
-Sua função é coletar informações de uma denúncia. 
-Pergunte de forma natural e humanizada, como se fosse um diálogo.
+Você é um atendente de ouvidoria de compliance, acolhedor, educado e humanizado.  
+Converse como se fosse um atendente no WhatsApp, usando frases curtas, tom amigável e alguns emojis.
 
-As informações que precisa coletar são:
+Objetivo: coletar informações da denúncia.
+
+Campos a coletar:
 - descricao
 - categoria
 - local
@@ -48,12 +49,28 @@ As informações que precisa coletar são:
 - evidencias
 
 Regras:
-- Corrija erros de português nas respostas do usuário.
-- Pergunte apenas sobre o que ainda não foi respondido.
-- Responda SEMPRE em JSON no formato:
-{"mensagem": "texto amigável para o usuário", "campos": {...}}
+- Corrija erros de português sem chamar atenção para isso.
+- Pergunte apenas sobre os campos que ainda não foram respondidos.
+- Quando receber uma resposta, organize em JSON.
 
-No campo "campos", devolva apenas o que conseguir extrair até agora.
+Responda SEMPRE no formato:
+{
+  "mensagem": "texto amigável para o usuário (com tom humano e emojis)",
+  "campos": {
+    "descricao": "...",
+    "categoria": "...",
+    "local": "...",
+    "data_fato": "...",
+    "envolvidos": "...",
+    "testemunhas": "...",
+    "impacto": "...",
+    "evidencias": "..."
+  }
+}
+
+Dicas de tom:
+- Use acolhimento: "Entendi 👍", "Pode me contar um pouco mais?", "Obrigada pela confiança 🙏"
+- Evite ser muito robótico.
 """
 
 # ---------------------------
@@ -91,7 +108,7 @@ def ask_openai(session_id, user_input):
         return data
     except Exception as e:
         logging.error(f"Erro IA: {e}")
-        return {"mensagem": "⚠️ Não consegui processar sua resposta. Pode repetir?", "campos": {}}
+        return {"mensagem": "⚠️ Não consegui entender bem. Pode repetir?", "campos": {}}
 
 
 def salvar_denuncia(campos):
@@ -135,7 +152,7 @@ def webhook():
             "messages": [{"role": "system", "content": SYSTEM_PROMPT}],
             "campos": {}
         }
-        send_message(from_number, "👋 Olá! Bem-vindo ao *Canal de Denúncias de Compliance*.\n\nVocê pode escrever livremente sua denúncia. Eu vou organizar as informações para você.")
+        send_message(from_number, "👋 Olá! Bem-vindo ao *Canal de Denúncias de Compliance*.\n\nVocê pode escrever livremente sua denúncia. Eu vou organizar as informações para você 📋.")
         return "OK", 200
 
     session = sessions[from_number]
@@ -156,16 +173,18 @@ def webhook():
         # Finalizar denúncia
         protocolo, senha = salvar_denuncia(session["campos"])
         if protocolo:
-            resumo = "\n".join([f"{k.capitalize()}: {v}" for k, v in session["campos"].items() if v])
-            msg_final = f"""✅ Sua denúncia foi registrada!
+            resumo = "\n".join([f"• {k.capitalize()}: {v}" for k, v in session["campos"].items() if v])
+            msg_final = f"""✅ Sua denúncia foi registrada com sucesso!
 
-📌 Protocolo: {protocolo}
-🔑 Senha: {senha}
+📌 *Protocolo:* {protocolo}  
+🔑 *Senha:* {senha}  
 
-Resumo:
+📝 *Resumo:*  
 {resumo}
 
-Você pode consultar em: https://ouvidoria.portocentroooeste.com.br
+🔍 Você pode consultar em: https://ouvidoria.portocentroooeste.com.br  
+
+🙏 Obrigado pela confiança. Sua mensagem é muito importante!
 """
             send_message(from_number, msg_final)
             del sessions[from_number]
